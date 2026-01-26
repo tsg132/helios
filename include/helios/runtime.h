@@ -83,7 +83,7 @@ namespace helios {
     class Runtime {
         public:
 
-            RunResult run(const Operator& op, Scheduler& scheduler, const RuntimeConfig& config);
+            RunResult run(const Operator& op, Scheduler& scheduler, real_t* x, const RuntimeConfig& config);
 
             static real_t residual_inf(const Operator& op, const real_t* x, int stride = 1);
 
