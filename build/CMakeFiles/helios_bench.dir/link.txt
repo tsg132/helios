@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -flto=thin -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/helios_bench.dir/bench/run_bench.cc.o CMakeFiles/helios_bench.dir/bench/gen/gen_grid.cc.o CMakeFiles/helios_bench.dir/bench/gen/gen_metastable.cc.o CMakeFiles/helios_bench.dir/bench/gen/gen_random_graph.cc.o -o bin/helios_bench  lib/libhelios.a
