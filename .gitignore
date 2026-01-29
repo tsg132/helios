@@ -1,0 +1,20 @@
+# Build directories
+build/
+out/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Clangd cache
+.cache/
+
+# CMake generated
+compile_commands.json
+CMakeUserPresets.json
+
+# OS files
+.DS_Store
+Thumbs.db

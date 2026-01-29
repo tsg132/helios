@@ -2,11 +2,88 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Status
+## Project Goal
 
-Initialized. Singe node, multi-threaded, async fixed point runtime for various operators.
+Helios is a **production-grade deterministic execution engine** for computing fixed points of contractive operators:
 
-## Getting Started
+```
+x = F(x),  F: R^n -> R^n
+```
+
+Primary use case: **Policy evaluation in MDPs** via the Bellman equation `V = r + βPV`.
+
+## Build Commands
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build                    # Build all (library + bench + tests)
+cmake --build build --target helios    # Build library only
+cmake --build build --target helios_tests
+./build/bin/helios_tests               # Run tests
+```
+
+## Current Progress (Phase 1)
+
+| Step | Component | Status | Notes |
+|------|-----------|--------|-------|
+| 0 | Setup (CMake, types.h) | ✅ Done | C++20, LTO, sanitizers configured |
+| 1 | Core interfaces | ✅ Done | operator.h, scheduler.h, runtime.h |
+| 2 | Policy Evaluation | ✅ Done | mdp.h (CSR), policy_eval_op.cc |
+| 3a | Jacobi baseline | ✅ Done | Double-buffered synchronous iteration |
+| 3b | Gauss-Seidel | ❌ TODO | In-place sequential updates |
+| 4 | Async runtime | ❌ TODO | Multi-threaded + StaticBlocksScheduler |
+| 5 | Bench runner | ❌ TODO | CLI + CSV/JSON output |
+| 6 | Generators | ❌ TODO | grid, metastable, random_graph MDPs |
+| 7 | Scheduler upgrades | ❌ TODO | shuffled_blocks, residual_buckets |
+
+**Smoke test**: `tests/test_runtime_smoke.cc` - Ring MDP with n=16 states, verifies Jacobi converges to analytical solution V=10.0.
+
+## Architecture
+
+```
+Operator (n, apply_i, residual_i)     Scheduler (init, next)
+              │                              │
+              └──────────┬───────────────────┘
+                         ▼
+                   Runtime::run()
+                         │
+              ┌──────────┼──────────┐
+              ▼          ▼          ▼
+           Jacobi    GaussSeidel   Async
+           (done)    (stub)        (stub)
+                         │
+                         ▼
+                    RunResult
+```
+
+## Key Files
+
+- `include/helios/operator.h` - Abstract operator interface
+- `include/helios/scheduler.h` - Abstract scheduler interface
+- `include/helios/runtime.h` - RuntimeConfig, RunResult, Mode enum
+- `include/helios/mdp.h` - MDP struct with CSR storage
+- `include/helios/policy_eval_op.h` - Bellman operator F_i(x) = r_i + β·Σ P_ij·x_j
+- `src/runtime.cc` - Main execution loop (Jacobi implemented, GS/Async stubbed)
+- `docs/jacobi_and_smoke_test.md` - Detailed explanation of Jacobi iteration
+
+## Next Steps
+
+1. **Implement Gauss-Seidel** in `run_gauss_seidel_()` - single-threaded in-place updates
+2. **Implement StaticBlocksScheduler** - partition [0,n) into contiguous blocks per thread
+3. **Implement Async mode** in `run_async_()` - multi-threaded workers calling scheduler
+4. **Add tests** for GS and Async modes
+
+## Guidelines for Claude Code
+
+- Don't implement features ahead of the checklist order
+- Keep the Operator/Scheduler/Runtime separation clean
+- All operators must be thread-safe (read-only access to internal state)
+- Use CSR format for sparse matrices
+- Convergence criterion: ‖F(x) - x‖_∞ ≤ ε
+
+---
+
+## Reference: Phase 1 Checklist (Original Plan)
 
 Structure I am following, this is my documentation, don't try implementing this on your own Claude Code!!!
 

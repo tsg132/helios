@@ -242,12 +242,215 @@ RunResult Runtime::run_jacobi_(const Operator& op, real_t* x, const RuntimeConfi
   
 }
 
-RunResult Runtime::run_gauss_seidel_(const Operator&, real_t*, const RuntimeConfig&) {
-  return {};
+RunResult Runtime::run_gauss_seidel_(const Operator& op, real_t* x, const RuntimeConfig& cfg) {
+
+    const index_t n = op.n();
+
+    RunResult out{};
+
+    if (!x || n == 0) return out;
+
+    const real_t alpha = cfg.alpha;
+
+    const int stride = cfg.residual_scan_stride <= 0 ? 1 : cfg.residual_scan_stride;
+
+    const auto t0 = Clock::now();
+
+    auto t_last_sample = t0;
+
+    auto now_sec = [&]() {
+
+        return chrono::duration<double>(Clock::now() - t0).count(); // returns the number of ticks as a double
+
+    };
+
+    auto should_time_out = [&]() -> bool {
+
+        if (cfg.max_seconds <= 0.0) return false;
+
+        return now_sec() >= cfg.max_seconds;
+
+    };
+
+    auto should_update_out = [&] (uint64_t total_updates) -> bool {
+
+        if (cfg.max_updates == 0) return false;
+
+        return total_updates >= cfg.max_updates;
+    };
+
+    // Initial residual sample at t=0
+
+    {
+        const real_t r0 = residual_inf(op, x, stride);
+
+        out.final_residual_inf = r0;
+
+        if (cfg.record_trace) out.trace.push_back({0.0, r0});
+
+        if (r0 < cfg.eps) {
+
+            out.converged = true;
+
+            out.wall_time_sec = 0.0;
+
+            out.total_updates = 0;
+
+            out.updates_per_sec = 0.0;
+
+            return out;
+        }
+    }
+
+    uint64_t total_updates = 0;
+
+    while (true) {
+
+        if (should_time_out()) break;
+
+        if (should_update_out(total_updates)) break;
+
+        for (index_t i = 0; i < n; ++i) {
+
+            const real_t fi = op.apply_i(i, x); // uses current x, including earlier updates in this sweep.
+
+            x[i] = (real_t(1.0) - alpha) * x[i] + alpha * fi;
+        }
+
+        total_updates += static_cast<uint64_t>(n);
+
+        const auto t_now = Clock::now();
+
+        const int interval = cfg.monitor_interval_ms;
+
+        const bool sample_now =
+            (interval <= 0) || (chrono::duration_cast<chrono::milliseconds>(t_now - t_last_sample).count() >= interval);
+
+        if (sample_now) {
+
+            t_last_sample = t_now;
+
+            const real_t r = residual_inf(op, x, stride);
+
+            out.final_residual_inf = r;
+
+            if (cfg.record_trace) out.trace.push_back({now_sec(), r});
+
+            if (r <= cfg.eps) {
+
+                out.converged = true;
+
+                break;
+
+            }
+
+        }
+
+    }
+  
 }
 
-RunResult Runtime::run_async_(const Operator&, Scheduler&, real_t*, const RuntimeConfig&) {
-  return {};
+RunResult Runtime::run_async_(const Operator& op, Scheduler& sched, real_t* x, const RuntimeConfig& cfg) {
+    
+    const index_t n = op.n();
+
+    RunResult out{};
+
+    if (!x || n == 0) return out;
+
+    #ifndef NDEBUG
+
+        if (cfg.verify_invariants) op.check_invariants();
+
+    #endif
+
+    const int T = max(1, (int) cfg.num_threads);
+
+    sched.init(n, T);
+
+    const real_t alpha = cfg.alpha;
+
+    const int stride = (cfg.residual_scan_stride <= 0) ? 1 : cfg.residual_scan_stride;
+
+    const auto t0 = Clock::now();
+
+    auto now_sec = [&]() {
+
+        return chrono::duration<double>(Clock::now() - t0).count(); // returns the number of ticks as a double
+
+    };
+
+    auto timed_out = [&]() -> bool {
+
+        if (cfg.max_seconds <= 0.0) return false;
+
+        return now_sec() >= cfg.max_seconds;
+
+    };
+
+    atomic<bool> stop{false};
+
+    atomic<uint64_t> total_updates{0};
+
+    // Store best known residual for reporting/trace
+
+    atomic<real_t> residual_inf_atomic{numeric_limits<real_t>::infinity()};
+
+    // Monitor thread: periodically compute ||F(x) - x||_{\infty} and check for convergence/time limit
+
+    thread monitor([&]() {
+
+        auto last = Clock::now();
+
+        {
+
+            real_t mx = 0.0;
+
+            for (index_t i = 0; i < n; i = static_cast<index_t>(i + stride)) {
+
+                const real_t r = op.residual_i_async(i, x);
+
+                if (r > mx) mx = r;
+
+            }
+
+            residual_inf_atomic.store(mx, memory_order_relaxed);
+
+            if (cfg.record_trace) out.trace.push_back({0.0, mx});
+
+            if (mx <= cfg.eps) stop.store(true, memory_order_relaxed);
+
+        }
+
+        while (!stop.load(memory_order_relaxed)) {
+
+            if (timed_out()) {
+
+                stop.store(true, memory_order_relaxed);
+
+                break;
+
+            }
+
+            const int interval = cfg.monitor_interval_ms;
+
+            if (interval > 0) {
+
+                this_thread::sleep_for(chrono::milliseconds(interval));
+            
+            } else {
+
+                this_thread::yield();
+
+            }
+
+        }
+
+    });
+
+
+
+    
 }
 
 } // namespace helios

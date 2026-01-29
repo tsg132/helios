@@ -22,10 +22,11 @@ class PolicyEvalOp final : public Operator {
 
         real_t apply_i(index_t i, const real_t* x) const override;
 
-        real_t residual_i(index_t i, const real_t* x) const override {
-            const real_t Fx_i = apply_i(i, x);
-            return (real_t)abs(Fx_i - x[i]);
-        }
+        real_t residual_i(index_t i, const real_t* x) const override;
+
+        real_t apply_i_async(index_t i, const real_t* x) const override;
+
+        real_t residual_i_async(index_t i, const real_t* x) const override;
 
         string_view name() const noexcept override {
             return "policy_eval";

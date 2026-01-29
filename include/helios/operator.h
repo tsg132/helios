@@ -43,6 +43,20 @@ namespace helios {
             return (real_t)abs(apply_i(i, x) - x[i]);
         }
 
+        virtual real_t apply_i_async(index_t i, const real_t* x) const {
+            (void) i; (void) x;
+
+            throw runtime_error("Operator does not implement apply_i_async");
+        }
+
+        virtual real_t residual_i_async(index_t i, const real_t* x) const {
+            const real_t fi = apply_i_async(i, x);
+
+            (void) fi;
+
+            throw runtime_error("Operator does not implement residual_i_async");
+        }
+
         virtual string_view name() const noexcept {return "operator";}
 
         virtual void check_invariants() const {}
