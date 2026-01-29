@@ -39,7 +39,7 @@ namespace helios {
 
         virtual real_t apply_i(index_t i, const real_t* x) const = 0;
 
-        virtual real_t residual_i(index_t i, const real_t* x) {
+        virtual real_t residual_i(index_t i, const real_t* x) const {
             return (real_t)abs(apply_i(i, x) - x[i]);
         }
 

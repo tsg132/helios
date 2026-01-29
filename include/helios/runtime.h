@@ -60,8 +60,12 @@ namespace helios {
         size_t monitor_interval_ms = 100;
 
         int residual_scan_stride = 1;
-    
+
         bool verify_invariants = true;
+
+        bool record_trace = true;
+
+        Mode mode = Mode::Jacobi;
     };
 
     struct RunResult {

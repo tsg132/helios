@@ -1,6 +1,0 @@
-/Users/tsg/Desktop/helios/build/CMakeFiles/helios.dir
-/Users/tsg/Desktop/helios/build/CMakeFiles/helios_bench.dir
-/Users/tsg/Desktop/helios/build/CMakeFiles/helios_tests.dir
-/Users/tsg/Desktop/helios/build/CMakeFiles/test.dir
-/Users/tsg/Desktop/helios/build/CMakeFiles/edit_cache.dir
-/Users/tsg/Desktop/helios/build/CMakeFiles/rebuild_cache.dir
