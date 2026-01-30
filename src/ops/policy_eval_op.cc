@@ -54,7 +54,7 @@ real_t PolicyEvalOp::apply_i_async(index_t i, const real_t* x) const {
 
         const index_t j = mdp.col_idx[k];
 
-        const real_t xj = atomic_ref<const real_t>(x[j]).load(memory_order_relaxed);
+        const real_t xj = atomic_ref<real_t>(const_cast<real_t&>(x[j])).load(memory_order_relaxed);
 
         dot += mdp.probs[k] * xj;
 
@@ -64,7 +64,14 @@ real_t PolicyEvalOp::apply_i_async(index_t i, const real_t* x) const {
 
 }
 
+real_t PolicyEvalOp::residual_i_async(index_t i, const real_t* x) const {
 
+    const real_t fi = apply_i_async(i, x);
 
+    const real_t xi = atomic_ref<real_t>(const_cast<real_t&>(x[i])).load(memory_order_relaxed);
+
+    return (real_t)abs(fi - xi);
+
+}
 
 } // namespace helios

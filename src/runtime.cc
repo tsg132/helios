@@ -347,7 +347,18 @@ RunResult Runtime::run_gauss_seidel_(const Operator& op, real_t* x, const Runtim
         }
 
     }
-  
+
+    out.wall_time_sec = now_sec();
+
+    out.total_updates = total_updates;
+
+    out.updates_per_sec = (out.wall_time_sec > 0.0) ? (static_cast<double>(total_updates) / out.wall_time_sec) : 0.0;
+
+    out.final_residual_inf = residual_inf(op, x, stride);
+
+    out.converged = (out.final_residual_inf <= cfg.eps);
+
+    return out;
 }
 
 RunResult Runtime::run_async_(const Operator& op, Scheduler& sched, real_t* x, const RuntimeConfig& cfg) {
@@ -365,8 +376,6 @@ RunResult Runtime::run_async_(const Operator& op, Scheduler& sched, real_t* x, c
     #endif
 
     const int T = max(1, (int) cfg.num_threads);
-
-    sched.init(n, T);
 
     const real_t alpha = cfg.alpha;
 
@@ -399,8 +408,6 @@ RunResult Runtime::run_async_(const Operator& op, Scheduler& sched, real_t* x, c
     // Monitor thread: periodically compute ||F(x) - x||_{\infty} and check for convergence/time limit
 
     thread monitor([&]() {
-
-        auto last = Clock::now();
 
         {
 
@@ -444,12 +451,121 @@ RunResult Runtime::run_async_(const Operator& op, Scheduler& sched, real_t* x, c
 
             }
 
+            real_t mx = 0.0;
+
+            for (index_t i = 0; i < n; i = static_cast<index_t>(i + stride)) {
+
+                const real_t r = op.residual_i_async(i, x);
+
+                if (r > mx) mx = r;
+
+            }
+
+            residual_inf_atomic.store(mx, memory_order_relaxed);
+
+            if (cfg.record_trace) out.trace.push_back({now_sec(), mx});
+
+            if (mx <= cfg.eps) {
+
+                stop.store(true, memory_order_relaxed);
+
+                break;
+
+            }
+
+            if (cfg.max_updates != 0 && total_updates.load(memory_order_relaxed) >= cfg.max_updates) {
+
+                stop.store(true, memory_order_relaxed);
+
+                break; 
+
+            }
+
         }
 
     });
 
+    // Worker threads: asynchronous coordinate updates:
+
+    vector<thread> workers;
+
+    workers.reserve(T);
+
+    for (int tid = 0; tid < T; ++tid) {
+
+        workers.emplace_back([&, tid]() {
+
+            while (!stop.load(memory_order_relaxed)) {
+
+                if (timed_out()) {
+
+                    stop.store(true, memory_order_relaxed);
+
+                    break;
+                }
+
+                if (cfg.max_updates != 0 && total_updates.load(memory_order_relaxed) >= cfg.max_updates) {
+
+                    stop.store(true, memory_order_relaxed);
+
+                    break; 
+
+                }
+
+                const index_t i = sched.next(tid);
+
+                if (i >= n) {
+                    this_thread::yield();
+
+                    continue; 
 
 
+                }
+
+                const real_t fi = op.apply_i_async(i, x);
+
+                atomic_ref<real_t> xi_ref(x[i]);
+
+                const real_t xi = xi_ref.load(memory_order_relaxed);
+
+                const real_t xnew = (real_t(1.0) - alpha) * xi + alpha * fi;
+
+                xi_ref.store(xnew, memory_order_relaxed);
+
+                total_updates.fetch_add(1, memory_order_relaxed);
+
+            }
+
+        });
+    }
+
+    for (auto& th : workers) th.join();
+
+    stop.store(true, memory_order_relaxed);
+
+    if (monitor.joinable()) monitor.join();
+
+    out.wall_time_sec = now_sec();
+
+    out.total_updates = total_updates.load(memory_order_relaxed);
+
+    out.updates_per_sec = (out.wall_time_sec > 0.0) ? (out.total_updates / out.wall_time_sec) : 0.0;
+
+    out.final_residual_inf = residual_inf_atomic.load(memory_order_relaxed);
+
+    out.converged = (out.final_residual_inf <= cfg.eps);
+
+    if (cfg.record_trace) {
+
+        if (out.trace.empty() || out.trace.back().time_sec < out.wall_time_sec) {
+
+            out.trace.push_back({out.wall_time_sec, out.final_residual_inf});
+
+        }
+
+    }
+
+    return out;
     
 }
 

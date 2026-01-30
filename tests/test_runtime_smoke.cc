@@ -142,11 +142,177 @@ bool test_residual_computation() {
     return true;
 }
 
+bool test_gauss_seidel_ring_convergence() {
+    constexpr index_t n = 16;
+    constexpr real_t beta = 0.9;
+    constexpr real_t eps = 1e-6;
+
+    MDP mdp = build_ring_mdp(n, beta);
+    mdp.validate(true);
+
+    PolicyEvalOp op(&mdp);
+    std::vector<real_t> x(n, 0.0);
+
+    RuntimeConfig cfg;
+    cfg.mode = Mode::GaussSeidel;
+    cfg.alpha = 1.0;
+    cfg.eps = eps;
+    cfg.max_seconds = 10.0;
+    cfg.max_updates = 0;
+    cfg.monitor_interval_ms = 10;
+    cfg.record_trace = true;
+
+    Runtime rt;
+    StaticBlocksScheduler sched;
+    RunResult result = rt.run(op, sched, x.data(), cfg);
+
+    if (!result.converged) {
+        std::printf("FAIL: Gauss-Seidel did not converge\n");
+        std::printf("  final_residual_inf = %.9e (eps = %.9e)\n",
+                    result.final_residual_inf, eps);
+        return false;
+    }
+
+    const real_t expected = 1.0 / (1.0 - beta);
+    real_t max_err = 0.0;
+    for (index_t i = 0; i < n; ++i) {
+        real_t err = std::abs(x[i] - expected);
+        if (err > max_err) max_err = err;
+    }
+
+    if (max_err > eps * 10) {
+        std::printf("FAIL: Gauss-Seidel solution not close to analytical value\n");
+        std::printf("  expected = %.6f, max_err = %.9e\n", expected, max_err);
+        return false;
+    }
+
+    std::printf("PASS: Gauss-Seidel ring convergence\n");
+    std::printf("  n = %u, beta = %.2f, eps = %.1e\n", n, beta, eps);
+    std::printf("  converged in %.3f sec, %" PRIu64 " updates (%.2e updates/sec)\n",
+                result.wall_time_sec, result.total_updates, result.updates_per_sec);
+    std::printf("  solution x[0] = %.6f (expected %.6f, max_err = %.9e)\n",
+                x[0], expected, max_err);
+
+    return true;
+}
+
+bool test_async_ring_convergence() {
+    constexpr index_t n = 16;
+    constexpr real_t beta = 0.9;
+    constexpr real_t eps = 1e-6;
+
+    MDP mdp = build_ring_mdp(n, beta);
+    mdp.validate(true);
+
+    PolicyEvalOp op(&mdp);
+    std::vector<real_t> x(n, 0.0);
+
+    RuntimeConfig cfg;
+    cfg.mode = Mode::Async;
+    cfg.num_threads = 2;
+    cfg.alpha = 1.0;
+    cfg.eps = eps;
+    cfg.max_seconds = 10.0;
+    cfg.max_updates = 0;
+    cfg.monitor_interval_ms = 10;
+    cfg.record_trace = true;
+
+    Runtime rt;
+    StaticBlocksScheduler sched;
+    RunResult result = rt.run(op, sched, x.data(), cfg);
+
+    if (!result.converged) {
+        std::printf("FAIL: Async did not converge\n");
+        std::printf("  final_residual_inf = %.9e (eps = %.9e)\n",
+                    result.final_residual_inf, eps);
+        return false;
+    }
+
+    const real_t expected = 1.0 / (1.0 - beta);
+    real_t max_err = 0.0;
+    for (index_t i = 0; i < n; ++i) {
+        real_t err = std::abs(x[i] - expected);
+        if (err > max_err) max_err = err;
+    }
+
+    if (max_err > eps * 10) {
+        std::printf("FAIL: Async solution not close to analytical value\n");
+        std::printf("  expected = %.6f, max_err = %.9e\n", expected, max_err);
+        return false;
+    }
+
+    std::printf("PASS: Async ring convergence\n");
+    std::printf("  n = %u, beta = %.2f, eps = %.1e, threads = %zu\n", n, beta, eps, cfg.num_threads);
+    std::printf("  converged in %.3f sec, %" PRIu64 " updates (%.2e updates/sec)\n",
+                result.wall_time_sec, result.total_updates, result.updates_per_sec);
+    std::printf("  solution x[0] = %.6f (expected %.6f, max_err = %.9e)\n",
+                x[0], expected, max_err);
+
+    return true;
+}
+
+bool test_async_multithread_stress() {
+    // Larger problem with more threads to stress-test concurrency
+    constexpr index_t n = 256;
+    constexpr real_t beta = 0.95;
+    constexpr real_t eps = 1e-5;
+
+    MDP mdp = build_ring_mdp(n, beta);
+    mdp.validate(true);
+
+    PolicyEvalOp op(&mdp);
+    std::vector<real_t> x(n, 0.0);
+
+    RuntimeConfig cfg;
+    cfg.mode = Mode::Async;
+    cfg.num_threads = 4;
+    cfg.alpha = 1.0;
+    cfg.eps = eps;
+    cfg.max_seconds = 30.0;
+    cfg.max_updates = 0;
+    cfg.monitor_interval_ms = 50;
+    cfg.record_trace = false;
+
+    Runtime rt;
+    StaticBlocksScheduler sched;
+    RunResult result = rt.run(op, sched, x.data(), cfg);
+
+    if (!result.converged) {
+        std::printf("FAIL: Async stress test did not converge\n");
+        std::printf("  final_residual_inf = %.9e (eps = %.9e)\n",
+                    result.final_residual_inf, eps);
+        return false;
+    }
+
+    const real_t expected = 1.0 / (1.0 - beta);
+    real_t max_err = 0.0;
+    for (index_t i = 0; i < n; ++i) {
+        real_t err = std::abs(x[i] - expected);
+        if (err > max_err) max_err = err;
+    }
+
+    if (max_err > eps * 10) {
+        std::printf("FAIL: Async stress solution not close to analytical value\n");
+        std::printf("  expected = %.6f, max_err = %.9e\n", expected, max_err);
+        return false;
+    }
+
+    std::printf("PASS: Async multithread stress test\n");
+    std::printf("  n = %u, beta = %.2f, eps = %.1e, threads = %zu\n", n, beta, eps, cfg.num_threads);
+    std::printf("  converged in %.3f sec, %" PRIu64 " updates (%.2e updates/sec)\n",
+                result.wall_time_sec, result.total_updates, result.updates_per_sec);
+
+    return true;
+}
+
 int main() {
     int failures = 0;
 
     if (!test_residual_computation()) failures++;
     if (!test_jacobi_ring_convergence()) failures++;
+    if (!test_gauss_seidel_ring_convergence()) failures++;
+    if (!test_async_ring_convergence()) failures++;
+    if (!test_async_multithread_stress()) failures++;
 
     if (failures == 0) {
         std::printf("\nAll tests passed.\n");
