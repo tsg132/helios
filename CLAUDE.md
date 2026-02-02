@@ -22,20 +22,6 @@ cmake --build build --target helios_tests
 ./build/bin/helios_tests               # Run tests
 ```
 
-## Current Progress (Phase 1)
-
-| Step | Component | Status | Notes |
-|------|-----------|--------|-------|
-| 0 | Setup (CMake, types.h) | ✅ Done | C++20, LTO, sanitizers configured |
-| 1 | Core interfaces | ✅ Done | operator.h, scheduler.h, runtime.h |
-| 2 | Policy Evaluation | ✅ Done | mdp.h (CSR), policy_eval_op.cc |
-| 3a | Jacobi baseline | ✅ Done | Double-buffered synchronous iteration |
-| 3b | Gauss-Seidel | ❌ TODO | In-place sequential updates |
-| 4 | Async runtime | ❌ TODO | Multi-threaded + StaticBlocksScheduler |
-| 5 | Bench runner | ❌ TODO | CLI + CSV/JSON output |
-| 6 | Generators | ❌ TODO | grid, metastable, random_graph MDPs |
-| 7 | Scheduler upgrades | ❌ TODO | shuffled_blocks, residual_buckets |
-
 **Smoke test**: `tests/test_runtime_smoke.cc` - Ring MDP with n=16 states, verifies Jacobi converges to analytical solution V=10.0.
 
 ## Architecture
