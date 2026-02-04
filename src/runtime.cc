@@ -406,79 +406,84 @@ RunResult Runtime::run_async_(const Operator& op, Scheduler& sched, real_t* x, c
     atomic<real_t> residual_inf_atomic{numeric_limits<real_t>::infinity()};
 
     // Monitor thread: periodically compute ||F(x) - x||_{\infty} and check for convergence/time limit
+    // Also rebuilds priority schedulers periodically
+
+    const bool do_rebuild = sched.supports_rebuild() && cfg.rebuild_interval_ms > 0;
 
     thread monitor([&]() {
 
-        {
+        vector<real_t> residuals_buf;
+        if (do_rebuild) residuals_buf.resize(n);
 
+        auto t_last_rebuild = Clock::now();
+
+        // Helper to scan residuals and optionally collect them
+        auto scan_residuals = [&](bool collect) -> real_t {
             real_t mx = 0.0;
-
-            for (index_t i = 0; i < n; i = static_cast<index_t>(i + stride)) {
-
+            for (index_t i = 0; i < n; ++i) {
                 const real_t r = op.residual_i_async(i, x);
-
-                if (r > mx) mx = r;
-
+                if (collect) residuals_buf[i] = r;
+                if (i % stride == 0 && r > mx) mx = r;
             }
+            return mx;
+        };
+
+        // Initial scan
+        {
+            const bool need_rebuild = do_rebuild;
+            real_t mx = scan_residuals(need_rebuild);
 
             residual_inf_atomic.store(mx, memory_order_relaxed);
 
             if (cfg.record_trace) out.trace.push_back({0.0, mx});
 
-            if (mx <= cfg.eps) stop.store(true, memory_order_relaxed);
+            if (need_rebuild) {
+                sched.rebuild(residuals_buf);
+                t_last_rebuild = Clock::now();
+            }
 
+            if (mx <= cfg.eps) stop.store(true, memory_order_relaxed);
         }
 
         while (!stop.load(memory_order_relaxed)) {
 
             if (timed_out()) {
-
                 stop.store(true, memory_order_relaxed);
-
                 break;
-
             }
 
             const int interval = cfg.monitor_interval_ms;
 
             if (interval > 0) {
-
                 this_thread::sleep_for(chrono::milliseconds(interval));
-            
             } else {
-
                 this_thread::yield();
-
             }
 
-            real_t mx = 0.0;
+            // Check if rebuild is due
+            const bool need_rebuild = do_rebuild &&
+                chrono::duration_cast<chrono::milliseconds>(Clock::now() - t_last_rebuild).count()
+                    >= static_cast<long long>(cfg.rebuild_interval_ms);
 
-            for (index_t i = 0; i < n; i = static_cast<index_t>(i + stride)) {
-
-                const real_t r = op.residual_i_async(i, x);
-
-                if (r > mx) mx = r;
-
-            }
+            real_t mx = scan_residuals(need_rebuild);
 
             residual_inf_atomic.store(mx, memory_order_relaxed);
 
             if (cfg.record_trace) out.trace.push_back({now_sec(), mx});
 
+            if (need_rebuild) {
+                sched.rebuild(residuals_buf);
+                t_last_rebuild = Clock::now();
+            }
+
             if (mx <= cfg.eps) {
-
                 stop.store(true, memory_order_relaxed);
-
                 break;
-
             }
 
             if (cfg.max_updates != 0 && total_updates.load(memory_order_relaxed) >= cfg.max_updates) {
-
                 stop.store(true, memory_order_relaxed);
-
-                break; 
-
+                break;
             }
 
         }

@@ -44,6 +44,7 @@ add_library(helios
   src/runtime.cc
   src/schedulers/static_blocks.cc
   src/schedulers/shuffled_blocks.cc
+  src/schedulers/residual_buckets.cc
   src/ops/policy_eval_op.cc
   src/ops/linear_op.cc
 )

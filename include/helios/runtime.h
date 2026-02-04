@@ -59,6 +59,9 @@ namespace helios {
         uint64_t max_updates = 0;
         size_t monitor_interval_ms = 100;
 
+        // How often to rebuild priority schedulers (0 = never, uses monitor_interval_ms if not set)
+        size_t rebuild_interval_ms = 500;
+
         int residual_scan_stride = 1;
 
         bool verify_invariants = true;

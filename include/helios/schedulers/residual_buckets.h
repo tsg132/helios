@@ -47,13 +47,16 @@ class ResidualBucketsScheduler final : public Scheduler {
 
     };
 
-    explicit ResidualBucketsScheduler(Params p = {}) : params_(p) {}
+    ResidualBucketsScheduler() : params_() {}
+    explicit ResidualBucketsScheduler(Params p) : params_(p) {}
 
     void init(index_t n, size_t num_threads) override;
 
     index_t next(size_t tid) override;
 
-    void rebuild(const std::vector<real_t>& residuals);
+    void rebuild(const std::vector<real_t>& residuals) override;
+
+    bool supports_rebuild() const noexcept override { return true; }
 
     string_view name() const noexcept override { return "residual_buckets"; }
 
@@ -84,7 +87,7 @@ class ResidualBucketsScheduler final : public Scheduler {
 
         size_t num_threads_ = 0;
 
-        atomic<shared_ptr<Data>> data_{nullptr};
+        std::shared_ptr<Data> data_{nullptr};  // Protected by atomic_load/store
 
         vector<uint32_t> thread_bucket_hint_;
 
