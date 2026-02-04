@@ -100,6 +100,9 @@ void ResidualBucketsScheduler::rebuild(const std::vector<real_t>& residuals) {
         d->indices[pos] = i;
     }
 
+    // Reset thread hints so all threads start from highest-priority bucket
+    std::fill(thread_bucket_hint_.begin(), thread_bucket_hint_.end(), 0);
+
     // Atomically publish the new data structure
     std::atomic_store_explicit(&data_, std::move(d), std::memory_order_release);
 }

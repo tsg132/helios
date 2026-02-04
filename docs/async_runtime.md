@@ -205,22 +205,45 @@ workers.emplace_back([&, tid]() {
 The monitor thread runs concurrently with workers:
 
 ```cpp
-// From runtime.cc lines 410-486
+// From runtime.cc lines 410-491
+
+const bool do_rebuild = sched.supports_rebuild() && cfg.rebuild_interval_ms > 0;
 
 thread monitor([&]() {
+
+    // Buffer for residuals (only allocated if scheduler needs rebuild)
+    vector<real_t> residuals_buf;
+    if (do_rebuild) residuals_buf.resize(n);
+
+    auto t_last_rebuild = Clock::now();
+
+    // Helper to scan residuals and optionally collect them for rebuild
+    auto scan_residuals = [&](bool collect) -> real_t {
+        real_t mx = 0.0;
+        for (index_t i = 0; i < n; ++i) {
+            const real_t r = op.residual_i_async(i, x);
+            if (collect) residuals_buf[i] = r;
+            if (i % stride == 0 && r > mx) mx = r;
+        }
+        return mx;
+    };
 
     // ═══════════════════════════════════════════════════════════════════
     // Initial residual computation at t=0
     // ═══════════════════════════════════════════════════════════════════
     {
-        real_t mx = 0.0;
-        for (index_t i = 0; i < n; i += stride) {
-            const real_t r = op.residual_i_async(i, x);
-            if (r > mx) mx = r;
-        }
+        const bool need_rebuild = do_rebuild;
+        real_t mx = scan_residuals(need_rebuild);
+
         residual_inf_atomic.store(mx, memory_order_relaxed);
 
         if (cfg.record_trace) out.trace.push_back({0.0, mx});
+
+        // Initial rebuild for priority schedulers
+        if (need_rebuild) {
+            sched.rebuild(residuals_buf);
+            t_last_rebuild = Clock::now();
+        }
 
         if (mx <= cfg.eps) stop.store(true, memory_order_relaxed);
     }
@@ -243,16 +266,24 @@ thread monitor([&]() {
             this_thread::yield();
         }
 
-        // Compute current residual ‖F(x) - x‖_∞
-        real_t mx = 0.0;
-        for (index_t i = 0; i < n; i += stride) {
-            const real_t r = op.residual_i_async(i, x);
-            if (r > mx) mx = r;
-        }
+        // Check if rebuild is due
+        const bool need_rebuild = do_rebuild &&
+            chrono::duration_cast<chrono::milliseconds>(Clock::now() - t_last_rebuild).count()
+                >= static_cast<long long>(cfg.rebuild_interval_ms);
+
+        // Compute current residual ‖F(x) - x‖_∞ (collect residuals if rebuild needed)
+        real_t mx = scan_residuals(need_rebuild);
+
         residual_inf_atomic.store(mx, memory_order_relaxed);
 
         // Record trace point
         if (cfg.record_trace) out.trace.push_back({now_sec(), mx});
+
+        // Rebuild priority scheduler if due
+        if (need_rebuild) {
+            sched.rebuild(residuals_buf);
+            t_last_rebuild = Clock::now();
+        }
 
         // Check convergence
         if (mx <= cfg.eps) {
@@ -288,6 +319,10 @@ For priority schedulers like `ResidualBucketsScheduler`, the monitor periodicall
 const bool do_rebuild = sched.supports_rebuild() && cfg.rebuild_interval_ms > 0;
 
 // In monitor loop:
+const bool need_rebuild = do_rebuild &&
+    chrono::duration_cast<chrono::milliseconds>(Clock::now() - t_last_rebuild).count()
+        >= static_cast<long long>(cfg.rebuild_interval_ms);
+
 if (need_rebuild) {
     sched.rebuild(residuals_buf);  // Re-prioritize based on current residuals
     t_last_rebuild = Clock::now();
@@ -295,6 +330,12 @@ if (need_rebuild) {
 ```
 
 This ensures high-residual coordinates are processed first as the solution evolves, improving convergence speed.
+
+**Rebuild behavior:**
+- Collects residuals for all n coordinates during the scan
+- Calls `sched.rebuild(residuals)` to re-bucket indices by priority
+- The scheduler resets thread hints so workers start from highest-priority buckets
+- Controlled by `cfg.rebuild_interval_ms` (default: 500ms, 0 = never)
 
 ---
 

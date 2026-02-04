@@ -49,6 +49,13 @@ public:
     // Optional: notify scheduler of a residual update (for adaptive scheduling)
     virtual void notify(size_t tid, index_t i, real_t residual) {}
 
+    // Rebuild internal priority structure from current residuals.
+    // Default is no-op; priority schedulers (e.g., ResidualBucketsScheduler) override.
+    virtual void rebuild(const std::vector<real_t>& residuals) { (void)residuals; }
+
+    // Returns true if this scheduler benefits from periodic rebuild() calls.
+    virtual bool supports_rebuild() const noexcept { return false; }
+
     // Return scheduler name for logging/debugging
     virtual string_view name() const noexcept { return "scheduler"; }
 };
@@ -61,6 +68,8 @@ public:
 | `init(n, T)` | Called once before `next()` | Scheduler ready for T threads over [0, n) |
 | `next(tid)` | `tid < num_threads` | Returns valid index in [0, n) or cycles |
 | `notify(...)` | Optional | May influence future `next()` calls |
+| `rebuild(residuals)` | `residuals.size() == n` | Priority structure rebuilt from residuals |
+| `supports_rebuild()` | None | Returns true if scheduler uses `rebuild()` |
 
 ---
 
@@ -263,10 +272,17 @@ void ResidualBucketsScheduler::rebuild(const std::vector<real_t>& residuals) {
         d->indices[pos] = i;
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Reset thread hints so all threads start from highest-priority bucket
+    // ═══════════════════════════════════════════════════════════════════
+    std::fill(thread_bucket_hint_.begin(), thread_bucket_hint_.end(), 0);
+
     // Atomically publish the new data structure
     std::atomic_store_explicit(&data_, std::move(d), std::memory_order_release);
 }
 ```
+
+**Important**: After placing indices, we reset all thread hints to 0 so threads start scanning from the highest-priority bucket (B-1) on the next `next()` call. This ensures threads don't miss newly populated high-priority buckets after rebuild.
 
 **Example**: `n=10`, residuals yield bucket assignments `[0,0,1,1,1,2,2,3,3,3]`
 
