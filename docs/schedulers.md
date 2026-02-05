@@ -9,13 +9,18 @@ This document provides an in-depth explanation of the scheduling subsystem in He
 1. [Overview](#overview)
 2. [Scheduler Interface](#scheduler-interface)
 3. [StaticBlocksScheduler](#staticblocksscheduler)
-4. [ResidualBucketsScheduler](#residualbucketsscheduler)
+4. [ShuffledBlocksScheduler](#shuffledblocksscheduler)
+5. [TopKGSScheduler](#topkgsscheduler)
+   - [Algorithm Overview](#algorithm-overview)
+   - [Rebuild Algorithm](#rebuild-algorithm)
+   - [Index Dispatch](#topk-index-dispatch)
+6. [ResidualBucketsScheduler](#residualbucketsscheduler)
    - [Bucket Assignment Algorithm](#bucket-assignment-algorithm)
    - [Two-Pass Rebuild Algorithm](#two-pass-rebuild-algorithm)
    - [Lock-Free Index Dispatch](#lock-free-index-dispatch)
    - [Data Structure Layout](#data-structure-layout)
-5. [Thread Safety Guarantees](#thread-safety-guarantees)
-6. [Performance Considerations](#performance-considerations)
+7. [Thread Safety Guarantees](#thread-safety-guarantees)
+8. [Performance Considerations](#performance-considerations)
 
 ---
 
@@ -142,6 +147,229 @@ index_t StaticBlocksScheduler::next(size_t tid) {
 | Priority | None (round-robin within block) |
 | Cache locality | Excellent (contiguous access) |
 | Load balancing | Static (blocks differ by at most 1) |
+
+---
+
+## ShuffledBlocksScheduler
+
+**Files**: `include/helios/schedulers/shuffled_blocks.h`, `src/schedulers/shuffled_blocks.cc`
+
+An enhancement over StaticBlocksScheduler that adds randomization. Each thread owns a contiguous block of indices but iterates through them in **shuffled order**. After completing a full epoch (one pass through the block), the order is reshuffled.
+
+### Motivation
+
+In some problems, the sequential access pattern of StaticBlocks can lead to systematic biases or slower convergence. Shuffling the access order within each block:
+- Breaks correlation patterns between neighboring indices
+- Can improve convergence for certain problem structures
+- Maintains cache locality benefits (indices still come from a contiguous block)
+
+### Initialization
+
+```cpp
+void ShuffledBlocksScheduler::init(index_t n, size_t num_threads) {
+    // Partition [0, n) into contiguous blocks (same as StaticBlocks)
+    // ...
+
+    for (size_t tid = 0; tid < num_threads_; ++tid) {
+        // Initialize per-thread RNG with deterministic seed
+        rngs_[tid].seed(static_cast<uint64_t>(tid) * 0x9E3779B97F4A7C15ULL + 42);
+
+        // Fill shuffled_indices_[tid] with [block_begin, block_end)
+        std::iota(shuffled_indices_[tid].begin(), shuffled_indices_[tid].end(), start);
+
+        // Initial shuffle
+        std::shuffle(shuffled_indices_[tid].begin(), shuffled_indices_[tid].end(), rngs_[tid]);
+    }
+}
+```
+
+**Example**: `n=10, num_threads=2`
+```
+Thread 0 block: [0, 5) → indices 0, 1, 2, 3, 4
+  Epoch 1 order: [3, 0, 4, 1, 2]  (shuffled)
+  Epoch 2 order: [1, 4, 0, 2, 3]  (reshuffled)
+
+Thread 1 block: [5, 10) → indices 5, 6, 7, 8, 9
+  Epoch 1 order: [7, 5, 9, 6, 8]  (shuffled)
+  Epoch 2 order: [6, 9, 5, 8, 7]  (reshuffled)
+```
+
+### Index Dispatch
+
+```cpp
+index_t ShuffledBlocksScheduler::next(size_t tid) {
+    auto& indices = shuffled_indices_[tid];
+    const size_t pos = cursor_[tid];
+    const index_t i = indices[pos];
+
+    // Advance cursor
+    cursor_[tid] = pos + 1;
+
+    // If epoch complete, reshuffle for next epoch
+    if (cursor_[tid] >= indices.size()) {
+        reshuffle(tid);  // Shuffles indices and resets cursor to 0
+    }
+
+    return i;
+}
+```
+
+### Characteristics
+
+| Property | Value |
+|----------|-------|
+| Lock-free | Yes (no shared state between threads) |
+| Priority | None (random within block) |
+| Cache locality | Good (indices from contiguous block, but accessed randomly) |
+| Load balancing | Static (blocks differ by at most 1) |
+| Epoch behavior | Reshuffles after each complete pass |
+
+### When to Use
+
+- When StaticBlocks shows slow convergence due to access pattern correlations
+- When you want randomization without the overhead of priority scheduling
+- As a middle ground between StaticBlocks and ResidualBuckets
+
+---
+
+## TopKGSScheduler
+
+**Files**: `include/helios/schedulers/topk_gs.h`, `src/schedulers/topk_gs.cc`
+
+An approximation to Gauss-Southwell coordinate selection using a **Top-K hot set**. Instead of always selecting the single coordinate with maximum residual (expensive), we maintain a set of K coordinates with the largest residuals and dispatch from that set first.
+
+### Motivation
+
+Exact Gauss-Southwell chooses `i = argmax_i |F_i(x) - x_i|` at each step, which is O(n) per update and too expensive. Top-K GS approximates this by:
+
+1. **Rebuild phase**: Periodically compute all residuals and select the K largest (O(n) using `nth_element`)
+2. **Priority phase**: Dispatch indices from the hot set (O(1) per update)
+3. **Coverage phase**: Fall back to shuffled blocks to ensure all coordinates are updated
+
+This provides a good trade-off between greedy convergence and computational overhead.
+
+### Parameters
+
+```cpp
+struct TopKGSParams {
+    index_t K = 0;        // Hot set size (0 = auto: max(n*0.01, threads*256))
+    bool sort_hot = false; // Sort hot set by descending residual
+    uint64_t seed = 0;     // RNG seed for fallback (0 = default)
+};
+```
+
+### Algorithm Overview
+
+```
+REBUILD (called periodically by runtime monitor):
+  1. Compute residuals: rho[i] = |F_i(x) - x_i| for all i
+  2. Select Top-K: Use nth_element to find K largest
+  3. Optionally sort hot set by descending residual
+  4. Reset hot_cursor = 0, reshuffle fallback blocks
+
+NEXT(tid):
+  1. k = atomic_fetch_add(hot_cursor, 1)
+  2. If k < K: return hot[k]        // Priority phase
+  3. Else: return fallback.next(tid) // Coverage phase
+```
+
+### Rebuild Algorithm
+
+The rebuild uses `std::nth_element` for O(n) average-case Top-K selection:
+
+```cpp
+void TopKGSScheduler::rebuild(const std::vector<real_t>& residuals) {
+    // Build (residual, index) pairs
+    std::vector<std::pair<real_t, index_t>> pairs(n_);
+    for (index_t i = 0; i < n_; ++i) {
+        pairs[i] = {residuals[i], i};
+    }
+
+    // Partition: largest K elements at the end
+    const size_t pivot_pos = n_ - K_;
+    std::nth_element(pairs.begin(), pairs.begin() + pivot_pos, pairs.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Extract top-K indices
+    for (index_t i = 0; i < K_; ++i) {
+        d->hot[i] = pairs[pivot_pos + i].second;
+    }
+
+    // Optional: sort for closer-to-greedy order
+    if (params_.sort_hot) {
+        std::sort(d->hot.begin(), d->hot.end(),
+                  [&residuals](index_t a, index_t b) { return residuals[a] > residuals[b]; });
+    }
+
+    // Reset cursors and reshuffle fallback
+    d->hot_cursor.store(0, std::memory_order_relaxed);
+    // ... reshuffle fallback blocks ...
+}
+```
+
+**Key insight**: For any index `i` in the hot set:
+```
+rho[i] >= rho_sorted[K]
+```
+So all dispatched indices are "high residual" and approximate greedy selection.
+
+### TopK Index Dispatch
+
+```cpp
+index_t TopKGSScheduler::next(size_t tid) {
+    auto d = std::atomic_load_explicit(&data_, std::memory_order_acquire);
+
+    // Priority phase: try to get from hot set
+    const index_t k = d->hot_cursor.fetch_add(1, std::memory_order_relaxed);
+    if (k < K_) {
+        return d->hot[k];  // High-residual index
+    }
+
+    // Coverage phase: fall back to shuffled blocks
+    // (ensures all coordinates are updated for convergence)
+    return fallback_next(d, tid);
+}
+```
+
+**Two-phase behavior**:
+1. **Priority phase** (first K calls after rebuild): Returns high-residual indices from hot set
+2. **Coverage phase** (remaining calls): Returns indices from shuffled blocks for full coverage
+
+### Relationship to Gauss-Southwell
+
+| Method | Selection Rule | Cost per Update |
+|--------|---------------|-----------------|
+| Exact GS | `argmax_i rho[i]` | O(n) |
+| Top-K GS | Any `i` from hot set | O(1) |
+
+Top-K GS trades optimality for efficiency: instead of always picking THE maximum, we pick from a set of K large values.
+
+### Recommended Parameters
+
+```cpp
+// Default K formula:
+K = max(n * 0.01, num_threads * 256)  // clamped to [1, n]
+
+// Rebuild cadence (set in RuntimeConfig):
+cfg.rebuild_interval_ms = 100;  // Every 100ms
+```
+
+### Characteristics
+
+| Property | Value |
+|----------|-------|
+| Lock-free | Yes (atomic cursor for hot set) |
+| Priority | Top-K approximation to Gauss-Southwell |
+| Cache locality | Moderate (hot set indices not contiguous) |
+| Load balancing | Dynamic (hot set) + Static (fallback blocks) |
+| Rebuild cost | O(n) using nth_element |
+
+### When to Use
+
+- When residuals are highly skewed (some coordinates much larger than others)
+- For problems where greedy coordinate selection significantly improves convergence
+- When you want priority scheduling with guaranteed coverage
+- As a cheaper alternative to exact Gauss-Southwell
 
 ---
 
@@ -444,6 +672,23 @@ cursor:   [3,        4,       2,       0      ]
 - **Thread isolation**: Each thread only accesses its own `cursor_[tid]`
 - **No synchronization needed**: Completely lock-free
 
+### ShuffledBlocksScheduler
+
+- **Thread isolation**: Each thread only accesses its own `shuffled_indices_[tid]`, `cursor_[tid]`, and `rngs_[tid]`
+- **No synchronization needed**: Completely lock-free
+- **Deterministic seeding**: Each thread's RNG is seeded based on `tid` for reproducibility
+
+### TopKGSScheduler
+
+| Operation | Synchronization | Guarantee |
+|-----------|-----------------|-----------|
+| `data_` access | `atomic_load/store` | Snapshot isolation |
+| `hot_cursor` | `fetch_add` | Atomic increment, no duplicates in priority phase |
+| Fallback cursors | Per-thread | No contention |
+
+- **Two-phase dispatch**: Hot set uses shared atomic cursor; fallback is thread-isolated
+- **Rebuild safety**: New epoch data published atomically, workers see consistent snapshot
+
 ### ResidualBucketsScheduler
 
 | Operation | Synchronization | Guarantee |
@@ -467,9 +712,15 @@ cursor:   [3,        4,       2,       0      ]
 | Scheduler | Access Pattern | Cache Efficiency |
 |-----------|---------------|------------------|
 | StaticBlocks | Sequential within block | Excellent |
+| ShuffledBlocks | Random within block | Good (block is contiguous in memory) |
+| TopKGS | Priority then random | Moderate (hot set scattered, fallback good) |
 | ResidualBuckets | Priority-ordered | Moderate (indices not contiguous) |
 
 ### Contention Points
+
+**TopKGSScheduler**:
+- `hot_cursor.fetch_add()` - contention during priority phase when all threads compete for hot set
+- Mitigated by: hot set exhausts quickly (K calls), then threads switch to isolated fallback
 
 **ResidualBucketsScheduler**:
 - `cursor[b].fetch_add()` - contention when multiple threads target same bucket
@@ -480,9 +731,13 @@ cursor:   [3,        4,       2,       0      ]
 | Scenario | Recommended Scheduler |
 |----------|----------------------|
 | Uniform residuals | StaticBlocks (simpler, cache-friendly) |
-| Skewed residuals | ResidualBuckets (prioritizes hot spots) |
+| Uniform residuals + slow convergence | ShuffledBlocks (breaks access correlations) |
+| Highly skewed residuals | TopKGS (approximates Gauss-Southwell) |
+| Moderately skewed residuals | ResidualBuckets (continuous prioritization) |
 | Many threads, small n | StaticBlocks (less contention) |
-| Few threads, large n | ResidualBuckets (better convergence) |
+| Few threads, large n | ResidualBuckets or TopKGS (better convergence) |
+| Want randomization, minimal overhead | ShuffledBlocks |
+| Want greedy-like + guaranteed coverage | TopKGS |
 
 ---
 
@@ -491,12 +746,25 @@ cursor:   [3,        4,       2,       0      ]
 The Helios scheduling subsystem provides:
 
 1. **StaticBlocksScheduler**: Simple, zero-contention partitioning for uniform workloads
-2. **ResidualBucketsScheduler**: Priority-based scheduling using logarithmic bucketing
+2. **ShuffledBlocksScheduler**: Randomized access within blocks, reshuffles each epoch
+3. **TopKGSScheduler**: Top-K Gauss-Southwell approximation with fallback coverage
+4. **ResidualBucketsScheduler**: Priority-based scheduling using logarithmic bucketing
 
-Both schedulers are:
+All schedulers are:
 - Fully lock-free in the dispatch hot path
 - Designed for continuous operation (cycling until convergence)
 - Thread-safe for concurrent access
+
+The ShuffledBlocksScheduler additionally provides:
+- Randomized iteration order to break access pattern correlations
+- Automatic reshuffling at epoch boundaries
+- Deterministic seeding for reproducibility
+
+The TopKGSScheduler additionally provides:
+- O(n) rebuild using nth_element for Top-K selection
+- Two-phase dispatch: priority (hot set) then coverage (shuffled blocks)
+- Approximates Gauss-Southwell coordinate selection efficiently
+- Guaranteed coverage via fallback to ensure convergence
 
 The ResidualBucketsScheduler additionally provides:
 - O(n) rebuild with two-pass bucket sort

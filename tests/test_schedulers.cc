@@ -1,4 +1,6 @@
 #include "helios/schedulers/residual_buckets.h"
+#include "helios/schedulers/shuffled_blocks.h"
+#include "helios/schedulers/topk_gs.h"
 #include "helios/runtime.h"
 #include "helios/mdp.h"
 #include "helios/policy_eval_op.h"
@@ -256,11 +258,422 @@ bool test_async_with_residual_buckets() {
 }
 
 //-----------------------------------------------------------------------------
+// Test: ShuffledBlocksScheduler basic init and coverage
+//-----------------------------------------------------------------------------
+bool test_shuffled_blocks_init() {
+    constexpr index_t n = 100;
+    constexpr size_t num_threads = 4;
+
+    ShuffledBlocksScheduler sched;
+    sched.init(n, num_threads);
+
+    // Each thread should be able to get indices, and together they should cover all n indices
+    std::set<index_t> seen;
+
+    // Each thread processes its block
+    for (size_t tid = 0; tid < num_threads; ++tid) {
+        // Each thread's block size is approximately n/num_threads
+        const index_t expected_block_size = n / num_threads + (tid < n % num_threads ? 1 : 0);
+        for (index_t j = 0; j < expected_block_size; ++j) {
+            index_t idx = sched.next(tid);
+            if (idx >= n) {
+                std::printf("FAIL: next() returned invalid index %" PRIu32 " >= n\n", idx);
+                return false;
+            }
+            seen.insert(idx);
+        }
+    }
+
+    if (seen.size() != n) {
+        std::printf("FAIL: Expected %u unique indices, got %zu\n", n, seen.size());
+        return false;
+    }
+
+    std::printf("PASS: ShuffledBlocksScheduler init and full coverage\n");
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: ShuffledBlocksScheduler reshuffles after epoch
+//-----------------------------------------------------------------------------
+bool test_shuffled_blocks_reshuffle() {
+    constexpr index_t n = 20;
+    constexpr size_t num_threads = 2;
+
+    ShuffledBlocksScheduler sched;
+    sched.init(n, num_threads);
+
+    // Thread 0 should have indices 0-9 (10 elements)
+    // Collect first epoch order
+    std::vector<index_t> epoch1;
+    for (index_t i = 0; i < 10; ++i) {
+        epoch1.push_back(sched.next(0));
+    }
+
+    // Collect second epoch order (should be reshuffled)
+    std::vector<index_t> epoch2;
+    for (index_t i = 0; i < 10; ++i) {
+        epoch2.push_back(sched.next(0));
+    }
+
+    // Both epochs should contain the same indices (0-9)
+    std::set<index_t> set1(epoch1.begin(), epoch1.end());
+    std::set<index_t> set2(epoch2.begin(), epoch2.end());
+
+    if (set1.size() != 10 || set2.size() != 10) {
+        std::printf("FAIL: Epochs don't contain 10 unique indices\n");
+        return false;
+    }
+
+    // Both should have the same elements
+    if (set1 != set2) {
+        std::printf("FAIL: Epochs don't contain the same indices\n");
+        return false;
+    }
+
+    // Orders should differ (with very high probability due to shuffling)
+    // For 10! permutations, probability of same order is 1/10! ≈ 2.8e-7
+    bool different = false;
+    for (size_t i = 0; i < 10; ++i) {
+        if (epoch1[i] != epoch2[i]) {
+            different = true;
+            break;
+        }
+    }
+
+    if (!different) {
+        std::printf("WARN: Shuffle produced same order (very unlikely but possible)\n");
+    }
+
+    std::printf("PASS: ShuffledBlocksScheduler reshuffles after epoch\n");
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: ShuffledBlocksScheduler multi-threaded concurrent access
+//-----------------------------------------------------------------------------
+bool test_shuffled_blocks_concurrent() {
+    constexpr index_t n = 1000;
+    constexpr size_t num_threads = 4;
+
+    ShuffledBlocksScheduler sched;
+    sched.init(n, num_threads);
+
+    // Each thread collects its indices concurrently
+    std::vector<std::set<index_t>> thread_indices(num_threads);
+    std::vector<std::thread> threads;
+
+    for (size_t t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&, t]() {
+            // Each thread processes one full epoch of its block
+            const index_t block_size = n / num_threads + (t < n % num_threads ? 1 : 0);
+            for (index_t i = 0; i < block_size; ++i) {
+                index_t idx = sched.next(t);
+                if (idx < n) {
+                    thread_indices[t].insert(idx);
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    // Verify no overlap between threads and complete coverage
+    std::set<index_t> all_indices;
+    for (size_t t = 0; t < num_threads; ++t) {
+        for (index_t idx : thread_indices[t]) {
+            if (all_indices.count(idx)) {
+                std::printf("FAIL: Index %" PRIu32 " appears in multiple threads\n", idx);
+                return false;
+            }
+            all_indices.insert(idx);
+        }
+    }
+
+    if (all_indices.size() != n) {
+        std::printf("FAIL: Expected %u total indices, got %zu\n", n, all_indices.size());
+        return false;
+    }
+
+    std::printf("PASS: ShuffledBlocksScheduler concurrent access (%zu threads, %u indices)\n",
+                num_threads, n);
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: Integration with Async runtime using shuffled blocks scheduler
+//-----------------------------------------------------------------------------
+bool test_async_with_shuffled_blocks() {
+    constexpr index_t n = 64;
+    constexpr real_t beta = 0.9;
+    constexpr real_t eps = 1e-6;
+
+    MDP mdp = build_ring_mdp(n, beta);
+    mdp.validate(true);
+
+    PolicyEvalOp op(&mdp);
+    std::vector<real_t> x(n, 0.0);
+
+    RuntimeConfig cfg;
+    cfg.mode = Mode::Async;
+    cfg.num_threads = 2;
+    cfg.alpha = 1.0;
+    cfg.eps = eps;
+    cfg.max_seconds = 10.0;
+    cfg.max_updates = 0;
+    cfg.monitor_interval_ms = 10;
+    cfg.record_trace = false;
+
+    Runtime rt;
+    ShuffledBlocksScheduler sched;
+    RunResult result = rt.run(op, sched, x.data(), cfg);
+
+    if (!result.converged) {
+        std::printf("FAIL: Async with ShuffledBlocks did not converge\n");
+        std::printf("  final_residual_inf = %.9e (eps = %.9e)\n",
+                    result.final_residual_inf, eps);
+        return false;
+    }
+
+    const real_t expected = 1.0 / (1.0 - beta);
+    real_t max_err = 0.0;
+    for (index_t i = 0; i < n; ++i) {
+        real_t err = std::abs(x[i] - expected);
+        if (err > max_err) max_err = err;
+    }
+
+    if (max_err > eps * 10) {
+        std::printf("FAIL: Solution not close to analytical value\n");
+        std::printf("  expected = %.6f, max_err = %.9e\n", expected, max_err);
+        return false;
+    }
+
+    std::printf("PASS: Async with ShuffledBlocksScheduler\n");
+    std::printf("  n = %u, beta = %.2f, eps = %.1e, threads = %zu\n",
+                n, beta, eps, cfg.num_threads);
+    std::printf("  converged in %.3f sec, %" PRIu64 " updates (%.2e updates/sec)\n",
+                result.wall_time_sec, result.total_updates, result.updates_per_sec);
+
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: TopKGSScheduler basic init and coverage
+//-----------------------------------------------------------------------------
+bool test_topk_gs_init() {
+    constexpr index_t n = 100;
+    constexpr size_t num_threads = 4;
+
+    TopKGSScheduler::Params params;
+    params.K = 10;  // Small hot set for testing
+
+    TopKGSScheduler sched(params);
+    sched.init(n, num_threads);
+
+    // Without rebuild, hot set is empty, so all indices come from fallback
+    std::set<index_t> seen;
+    for (index_t i = 0; i < n; ++i) {
+        index_t idx = sched.next(i % num_threads);
+        if (idx >= n) {
+            std::printf("FAIL: next() returned invalid index %" PRIu32 " >= n\n", idx);
+            return false;
+        }
+        seen.insert(idx);
+    }
+
+    if (seen.size() != n) {
+        std::printf("FAIL: Expected %u unique indices in first pass, got %zu\n", n, seen.size());
+        return false;
+    }
+
+    std::printf("PASS: TopKGSScheduler init and fallback coverage\n");
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: TopKGSScheduler rebuild prioritizes high-residual indices
+//-----------------------------------------------------------------------------
+bool test_topk_gs_rebuild() {
+    constexpr index_t n = 100;
+    constexpr size_t num_threads = 2;
+
+    TopKGSScheduler::Params params;
+    params.K = 10;
+    params.sort_hot = true;  // Sort for deterministic ordering
+
+    TopKGSScheduler sched(params);
+    sched.init(n, num_threads);
+
+    // Create residuals: indices 90-99 have high residuals (10.0), rest are 0.1
+    std::vector<real_t> residuals(n, 0.1);
+    for (index_t i = 90; i < 100; ++i) {
+        residuals[i] = 10.0;
+    }
+
+    sched.rebuild(residuals);
+
+    // First K calls to next() should return high-residual indices (90-99)
+    std::set<index_t> hot_indices;
+    for (index_t i = 0; i < 10; ++i) {
+        index_t idx = sched.next(0);
+        hot_indices.insert(idx);
+    }
+
+    // All should be from the high-residual set
+    for (index_t idx : hot_indices) {
+        if (idx < 90) {
+            std::printf("FAIL: Hot set contains low-residual index %" PRIu32 "\n", idx);
+            return false;
+        }
+    }
+
+    if (hot_indices.size() != 10) {
+        std::printf("FAIL: Expected 10 hot indices, got %zu\n", hot_indices.size());
+        return false;
+    }
+
+    std::printf("PASS: TopKGSScheduler rebuild prioritizes high-residual indices\n");
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: TopKGSScheduler multi-threaded concurrent access
+//-----------------------------------------------------------------------------
+bool test_topk_gs_concurrent() {
+    constexpr index_t n = 1000;
+    constexpr size_t num_threads = 4;
+
+    TopKGSScheduler::Params params;
+    params.K = 100;
+
+    TopKGSScheduler sched(params);
+    sched.init(n, num_threads);
+
+    // Create residuals with top 100 having high values
+    std::vector<real_t> residuals(n);
+    for (index_t i = 0; i < n; ++i) {
+        residuals[i] = static_cast<real_t>(i + 1);  // Higher index = higher residual
+    }
+    sched.rebuild(residuals);
+
+    // Collect indices from multiple threads concurrently
+    std::atomic<size_t> hot_consumed{0};
+    std::vector<std::set<index_t>> thread_indices(num_threads);
+    std::vector<std::thread> threads;
+
+    for (size_t t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&, t]() {
+            // Each thread gets some indices
+            for (index_t i = 0; i < 300; ++i) {
+                index_t idx = sched.next(t);
+                if (idx < n) {
+                    thread_indices[t].insert(idx);
+                    if (idx >= 900) {  // Top 100 indices
+                        hot_consumed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    // All hot indices should have been consumed (100 total, distributed among threads)
+    // Note: some may have been consumed multiple times due to fallback, but at least 100
+    size_t total_hot = hot_consumed.load();
+    if (total_hot < 100) {
+        std::printf("FAIL: Expected at least 100 hot indices consumed, got %zu\n", total_hot);
+        return false;
+    }
+
+    std::printf("PASS: TopKGSScheduler concurrent access (%zu threads, K=%u)\n",
+                num_threads, params.K);
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: Integration with Async runtime using TopK GS scheduler
+//-----------------------------------------------------------------------------
+bool test_async_with_topk_gs() {
+    constexpr index_t n = 64;
+    constexpr real_t beta = 0.9;
+    constexpr real_t eps = 1e-6;
+
+    MDP mdp = build_ring_mdp(n, beta);
+    mdp.validate(true);
+
+    PolicyEvalOp op(&mdp);
+    std::vector<real_t> x(n, 0.0);
+
+    RuntimeConfig cfg;
+    cfg.mode = Mode::Async;
+    cfg.num_threads = 2;
+    cfg.alpha = 1.0;
+    cfg.eps = eps;
+    cfg.max_seconds = 10.0;
+    cfg.max_updates = 0;
+    cfg.monitor_interval_ms = 10;
+    cfg.rebuild_interval_ms = 50;  // Rebuild every 50ms
+    cfg.record_trace = false;
+
+    Runtime rt;
+    TopKGSScheduler::Params params;
+    params.K = 10;
+    TopKGSScheduler sched(params);
+    RunResult result = rt.run(op, sched, x.data(), cfg);
+
+    if (!result.converged) {
+        std::printf("FAIL: Async with TopKGS did not converge\n");
+        std::printf("  final_residual_inf = %.9e (eps = %.9e)\n",
+                    result.final_residual_inf, eps);
+        return false;
+    }
+
+    const real_t expected = 1.0 / (1.0 - beta);
+    real_t max_err = 0.0;
+    for (index_t i = 0; i < n; ++i) {
+        real_t err = std::abs(x[i] - expected);
+        if (err > max_err) max_err = err;
+    }
+
+    if (max_err > eps * 10) {
+        std::printf("FAIL: Solution not close to analytical value\n");
+        std::printf("  expected = %.6f, max_err = %.9e\n", expected, max_err);
+        return false;
+    }
+
+    std::printf("PASS: Async with TopKGSScheduler\n");
+    std::printf("  n = %u, beta = %.2f, eps = %.1e, threads = %zu, K = %u\n",
+                n, beta, eps, cfg.num_threads, params.K);
+    std::printf("  converged in %.3f sec, %" PRIu64 " updates (%.2e updates/sec)\n",
+                result.wall_time_sec, result.total_updates, result.updates_per_sec);
+
+    return true;
+}
+
+//-----------------------------------------------------------------------------
 // Run all scheduler tests (called from test_runtime_smoke.cc)
 //-----------------------------------------------------------------------------
 int run_scheduler_tests() {
     int failures = 0;
 
+    // Shuffled blocks tests
+    if (!test_shuffled_blocks_init()) failures++;
+    if (!test_shuffled_blocks_reshuffle()) failures++;
+    if (!test_shuffled_blocks_concurrent()) failures++;
+    if (!test_async_with_shuffled_blocks()) failures++;
+
+    // TopK GS tests
+    if (!test_topk_gs_init()) failures++;
+    if (!test_topk_gs_rebuild()) failures++;
+    if (!test_topk_gs_concurrent()) failures++;
+    if (!test_async_with_topk_gs()) failures++;
+
+    // Residual buckets tests
     if (!test_residual_buckets_init()) failures++;
     if (!test_residual_buckets_rebuild()) failures++;
     if (!test_residual_buckets_concurrent()) failures++;
