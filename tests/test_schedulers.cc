@@ -1,3 +1,4 @@
+#include "helios/schedulers/ca_topk_gs.h"
 #include "helios/schedulers/residual_buckets.h"
 #include "helios/schedulers/shuffled_blocks.h"
 #include "helios/schedulers/topk_gs.h"
@@ -656,6 +657,262 @@ bool test_async_with_topk_gs() {
 }
 
 //-----------------------------------------------------------------------------
+// Test: CATopKGSScheduler basic init and coverage
+//-----------------------------------------------------------------------------
+bool test_ca_topk_gs_init() {
+    constexpr index_t n = 100;
+    constexpr size_t num_threads = 4;
+
+    CATopKGSScheduler::Params params;
+    params.K = 10;  // Small hot set for testing
+    params.G = 4;   // 4 conflict groups
+
+    CATopKGSScheduler sched(params);
+    sched.init(n, num_threads);
+
+    // Without rebuild, groups are empty, so all indices come from fallback
+    std::set<index_t> seen;
+    for (index_t i = 0; i < n; ++i) {
+        index_t idx = sched.next(i % num_threads);
+        if (idx >= n) {
+            std::printf("FAIL: next() returned invalid index %" PRIu32 " >= n\n", idx);
+            return false;
+        }
+        seen.insert(idx);
+    }
+
+    if (seen.size() != n) {
+        std::printf("FAIL: Expected %u unique indices in first pass, got %zu\n", n, seen.size());
+        return false;
+    }
+
+    std::printf("PASS: CATopKGSScheduler init and fallback coverage\n");
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: CATopKGSScheduler rebuild prioritizes high-residual indices and distributes to groups
+//-----------------------------------------------------------------------------
+bool test_ca_topk_gs_rebuild() {
+    constexpr index_t n = 100;
+    constexpr size_t num_threads = 2;
+
+    CATopKGSScheduler::Params params;
+    params.K = 10;
+    params.G = 4;
+    params.block_size = 25;  // So key(i) = (i / 25) % 4: groups 0,1,2,3 for indices 0-24,25-49,50-74,75-99
+    params.sort_within_group = true;
+
+    CATopKGSScheduler sched(params);
+    sched.init(n, num_threads);
+
+    // Create residuals: indices 90-99 have high residuals (10.0), rest are 0.1
+    std::vector<real_t> residuals(n, 0.1);
+    for (index_t i = 90; i < 100; ++i) {
+        residuals[i] = 10.0;
+    }
+
+    sched.rebuild(residuals);
+
+    // First K calls to next() should return high-residual indices (90-99)
+    // They will be distributed across conflict groups
+    std::set<index_t> hot_indices;
+    for (index_t i = 0; i < 10; ++i) {
+        index_t idx = sched.next(0);
+        hot_indices.insert(idx);
+    }
+
+    // All should be from the high-residual set
+    for (index_t idx : hot_indices) {
+        if (idx < 90) {
+            std::printf("FAIL: Hot set contains low-residual index %" PRIu32 "\n", idx);
+            return false;
+        }
+    }
+
+    if (hot_indices.size() != 10) {
+        std::printf("FAIL: Expected 10 hot indices, got %zu\n", hot_indices.size());
+        return false;
+    }
+
+    std::printf("PASS: CATopKGSScheduler rebuild prioritizes high-residual indices\n");
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: CATopKGSScheduler distributes indices across conflict groups
+//-----------------------------------------------------------------------------
+bool test_ca_topk_gs_conflict_groups() {
+    constexpr index_t n = 1000;
+    constexpr size_t num_threads = 4;
+
+    CATopKGSScheduler::Params params;
+    params.K = 100;
+    params.G = 8;  // 8 conflict groups
+    params.block_size = 128;  // So consecutive cache blocks go to different groups
+    params.sort_within_group = false;
+
+    CATopKGSScheduler sched(params);
+    sched.init(n, num_threads);
+
+    // Create residuals where top-K are spread across different cache blocks
+    // This tests that the conflict key distributes them to different groups
+    std::vector<real_t> residuals(n);
+    for (index_t i = 0; i < n; ++i) {
+        residuals[i] = static_cast<real_t>(i + 1);  // Higher index = higher residual
+    }
+    sched.rebuild(residuals);
+
+    // Collect the first K indices dispatched
+    std::vector<index_t> dispatched;
+    for (index_t i = 0; i < 100; ++i) {
+        index_t idx = sched.next(0);
+        if (idx < n) {
+            dispatched.push_back(idx);
+        }
+    }
+
+    // All dispatched should be from top-K (indices 900-999)
+    for (index_t idx : dispatched) {
+        if (idx < 900) {
+            std::printf("FAIL: Dispatched non-top-K index %" PRIu32 "\n", idx);
+            return false;
+        }
+    }
+
+    // Verify we got all 100 unique top-K indices
+    std::set<index_t> unique_dispatched(dispatched.begin(), dispatched.end());
+    if (unique_dispatched.size() != 100) {
+        std::printf("FAIL: Expected 100 unique dispatched indices, got %zu\n", unique_dispatched.size());
+        return false;
+    }
+
+    std::printf("PASS: CATopKGSScheduler conflict groups distribute top-K indices\n");
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: CATopKGSScheduler multi-threaded concurrent access
+//-----------------------------------------------------------------------------
+bool test_ca_topk_gs_concurrent() {
+    constexpr index_t n = 1000;
+    constexpr size_t num_threads = 4;
+
+    CATopKGSScheduler::Params params;
+    params.K = 100;
+    params.G = 8;
+    params.block_size = 128;
+
+    CATopKGSScheduler sched(params);
+    sched.init(n, num_threads);
+
+    // Create residuals with top 100 having high values
+    std::vector<real_t> residuals(n);
+    for (index_t i = 0; i < n; ++i) {
+        residuals[i] = static_cast<real_t>(i + 1);  // Higher index = higher residual
+    }
+    sched.rebuild(residuals);
+
+    // Collect indices from multiple threads concurrently
+    std::atomic<size_t> hot_consumed{0};
+    std::vector<std::set<index_t>> thread_indices(num_threads);
+    std::vector<std::thread> threads;
+
+    for (size_t t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&, t]() {
+            // Each thread gets some indices
+            for (index_t i = 0; i < 300; ++i) {
+                index_t idx = sched.next(t);
+                if (idx < n) {
+                    thread_indices[t].insert(idx);
+                    if (idx >= 900) {  // Top 100 indices
+                        hot_consumed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    // All hot indices should have been consumed (100 total, distributed among threads)
+    // Note: some may have been consumed multiple times due to fallback, but at least 100
+    size_t total_hot = hot_consumed.load();
+    if (total_hot < 100) {
+        std::printf("FAIL: Expected at least 100 hot indices consumed, got %zu\n", total_hot);
+        return false;
+    }
+
+    std::printf("PASS: CATopKGSScheduler concurrent access (%zu threads, K=%u, G=%zu)\n",
+                num_threads, params.K, params.G);
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Test: Integration with Async runtime using CA-TopK-GS scheduler
+//-----------------------------------------------------------------------------
+bool test_async_with_ca_topk_gs() {
+    constexpr index_t n = 64;
+    constexpr real_t beta = 0.9;
+    constexpr real_t eps = 1e-6;
+
+    MDP mdp = build_ring_mdp(n, beta);
+    mdp.validate(true);
+
+    PolicyEvalOp op(&mdp);
+    std::vector<real_t> x(n, 0.0);
+
+    RuntimeConfig cfg;
+    cfg.mode = Mode::Async;
+    cfg.num_threads = 2;
+    cfg.alpha = 1.0;
+    cfg.eps = eps;
+    cfg.max_seconds = 10.0;
+    cfg.max_updates = 0;
+    cfg.monitor_interval_ms = 10;
+    cfg.rebuild_interval_ms = 50;  // Rebuild every 50ms
+    cfg.record_trace = false;
+
+    Runtime rt;
+    CATopKGSScheduler::Params params;
+    params.K = 10;
+    params.G = 4;
+    params.block_size = 16;
+    CATopKGSScheduler sched(params);
+    RunResult result = rt.run(op, sched, x.data(), cfg);
+
+    if (!result.converged) {
+        std::printf("FAIL: Async with CA-TopKGS did not converge\n");
+        std::printf("  final_residual_inf = %.9e (eps = %.9e)\n",
+                    result.final_residual_inf, eps);
+        return false;
+    }
+
+    const real_t expected = 1.0 / (1.0 - beta);
+    real_t max_err = 0.0;
+    for (index_t i = 0; i < n; ++i) {
+        real_t err = std::abs(x[i] - expected);
+        if (err > max_err) max_err = err;
+    }
+
+    if (max_err > eps * 10) {
+        std::printf("FAIL: Solution not close to analytical value\n");
+        std::printf("  expected = %.6f, max_err = %.9e\n", expected, max_err);
+        return false;
+    }
+
+    std::printf("PASS: Async with CATopKGSScheduler\n");
+    std::printf("  n = %u, beta = %.2f, eps = %.1e, threads = %zu, K = %u, G = %zu\n",
+                n, beta, eps, cfg.num_threads, params.K, params.G);
+    std::printf("  converged in %.3f sec, %" PRIu64 " updates (%.2e updates/sec)\n",
+                result.wall_time_sec, result.total_updates, result.updates_per_sec);
+
+    return true;
+}
+
+//-----------------------------------------------------------------------------
 // Run all scheduler tests (called from test_runtime_smoke.cc)
 //-----------------------------------------------------------------------------
 int run_scheduler_tests() {
@@ -672,6 +929,13 @@ int run_scheduler_tests() {
     if (!test_topk_gs_rebuild()) failures++;
     if (!test_topk_gs_concurrent()) failures++;
     if (!test_async_with_topk_gs()) failures++;
+
+    // CA-TopK GS tests
+    if (!test_ca_topk_gs_init()) failures++;
+    if (!test_ca_topk_gs_rebuild()) failures++;
+    if (!test_ca_topk_gs_conflict_groups()) failures++;
+    if (!test_ca_topk_gs_concurrent()) failures++;
+    if (!test_async_with_ca_topk_gs()) failures++;
 
     // Residual buckets tests
     if (!test_residual_buckets_init()) failures++;

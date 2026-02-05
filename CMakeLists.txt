@@ -42,10 +42,12 @@ add_library(helios
   src/io.cc
   src/verify.cc
   src/runtime.cc
+  src/mdp_generators.cc
   src/schedulers/static_blocks.cc
   src/schedulers/shuffled_blocks.cc
   src/schedulers/residual_buckets.cc
   src/schedulers/topk_gs.cc
+  src/schedulers/ca_topk_gs.cc
   src/ops/policy_eval_op.cc
   src/ops/linear_op.cc
 )
@@ -87,6 +89,7 @@ if(HELIOS_BUILD_TESTS)
     tests/test_runtime_smoke.cc
     tests/test_operator_contract.cc
     tests/test_schedulers.cc
+    tests/test_complex_mdps.cc
   )
   target_link_libraries(helios_tests PRIVATE helios)
   # helios_set_warnings(helios_tests ${HELIOS_WERROR})

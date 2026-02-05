@@ -13,6 +13,9 @@ using namespace helios;
 // Forward declaration - defined in test_schedulers.cc
 int run_scheduler_tests();
 
+// Forward declaration - defined in test_complex_mdps.cc
+int run_complex_mdp_tests();
+
 // Build a ring MDP: state i transitions to self (0.5) and (i+1) mod n (0.5)
 // All rewards = 1.0, beta = discount factor
 MDP build_ring_mdp(index_t n, real_t beta) {
@@ -319,6 +322,9 @@ int main() {
 
     // Run scheduler tests
     failures += run_scheduler_tests();
+
+    // Run complex MDP convergence tests
+    failures += run_complex_mdp_tests();
 
     if (failures == 0) {
         std::printf("\nAll tests passed.\n");
