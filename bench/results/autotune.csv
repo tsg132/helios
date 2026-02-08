@@ -1,0 +1,4 @@
+mdp,planner,blk,colors,K,est_cost,pilot_ups,rdrop,at_sec,converged,wall_sec,ups
+Grid_AT,Static,32,0,0,3228.00,194387889.44,1450781.093238,0.332,true,0.105177,2.14e+08
+Meta_AT,Static,16,0,0,1024100.00,352559.33,0.851958,1.078,false,30.003612,3.49e+05
+Rand_AT,Static,32,0,0,10148.00,175806251.31,1138502.309103,0.723,true,0.316689,1.12e+08

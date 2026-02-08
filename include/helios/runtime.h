@@ -35,6 +35,8 @@ updates_per_sec, residual_trace.
 #include "helios/types.h"
 #include "helios/operator.h"
 #include "helios/scheduler.h"
+#include "helios/plan.h"
+#include "helios/profiling.h"
 
 using namespace std;
 
@@ -85,12 +87,17 @@ namespace helios {
 
         vector<ResidualSample> trace;
 
+        ProfilingResult profiling;
+
     };
 
     class Runtime {
         public:
 
             RunResult run(const Operator& op, Scheduler& scheduler, real_t* x, const RuntimeConfig& config);
+
+            // Plan executor: run an EpochPlan with T worker threads
+            RunResult run_plan(const Operator& op, const EpochPlan& plan, real_t* x, const RuntimeConfig& config);
 
             static real_t residual_inf(const Operator& op, const real_t* x, int stride = 1);
 

@@ -50,6 +50,9 @@ add_library(helios
   src/schedulers/ca_topk_gs.cc
   src/ops/policy_eval_op.cc
   src/ops/linear_op.cc
+  src/planners.cc
+  src/cost_model.cc
+  src/autotune.cc
 )
 
 target_include_directories(helios
@@ -90,6 +93,8 @@ if(HELIOS_BUILD_TESTS)
     tests/test_operator_contract.cc
     tests/test_schedulers.cc
     tests/test_complex_mdps.cc
+    tests/test_phase3.cc
+    tests/test_stress.cc
   )
   target_link_libraries(helios_tests PRIVATE helios)
   # helios_set_warnings(helios_tests ${HELIOS_WERROR})
