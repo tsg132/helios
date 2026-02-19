@@ -49,6 +49,7 @@ add_library(helios
   src/schedulers/topk_gs.cc
   src/schedulers/ca_topk_gs.cc
   src/ops/policy_eval_op.cc
+  src/ops/policy_eval_op_neon.cc
   src/ops/linear_op.cc
   src/planners.cc
   src/cost_model.cc
@@ -83,6 +84,13 @@ if(HELIOS_BUILD_BENCH)
   # helios_set_warnings(helios_bench ${HELIOS_WERROR})
   helios_enable_sanitizers(helios_bench ${HELIOS_ENABLE_ASAN} ${HELIOS_ENABLE_UBSAN})
   helios_enable_lto(helios_bench ${HELIOS_ENABLE_LTO})
+
+  add_executable(helios_bench_simd
+    bench/bench_simd.cc
+  )
+  target_link_libraries(helios_bench_simd PRIVATE helios)
+  helios_enable_sanitizers(helios_bench_simd ${HELIOS_ENABLE_ASAN} ${HELIOS_ENABLE_UBSAN})
+  helios_enable_lto(helios_bench_simd ${HELIOS_ENABLE_LTO})
 endif()
 
 # ---------- Tests ----------
@@ -102,4 +110,11 @@ if(HELIOS_BUILD_TESTS)
   # Usually keep LTO off for tests/debug, but fine either way:
   # helios_enable_lto(helios_tests ${HELIOS_ENABLE_LTO})
   add_test(NAME helios_tests COMMAND helios_tests)
+
+  add_executable(helios_simd_tests
+    tests/test_simd.cc
+  )
+  target_link_libraries(helios_simd_tests PRIVATE helios)
+  helios_enable_sanitizers(helios_simd_tests ${HELIOS_ENABLE_ASAN} ${HELIOS_ENABLE_UBSAN})
+  add_test(NAME helios_simd_tests COMMAND helios_simd_tests)
 endif()

@@ -1,0 +1,41 @@
+Helios SIMD Benchmark  [full mode]
+========================================
+ARM NEON: ENABLED
+
+====== Bench A: Sparse Dot Product (apply_i per row) ======
+n             nnz/row   Scalar(ns)     NEON(ns)    Speedup
+50000               4          3.2          2.9      1.10x
+50000               8          5.8          5.4      1.07x
+50000              16         11.8          9.8      1.20x
+50000              32         23.2         19.0      1.22x
+50000              64         45.0         38.4      1.17x
+
+====== Bench B: Jacobi Sweep (full epoch) ======
+n             nnz/row   Scalar(ms)     NEON(ms)    Speedup
+1000               20         0.01         0.00      1.58x
+10000              20         0.10         0.05      1.87x
+100000             20         1.36         1.25      1.09x
+500000             20         8.33         7.62      1.09x
+
+====== Bench C: Residual Max ======
+n             nnz/row   Scalar(ms)     NEON(ms)    Speedup
+1000               20         0.01         0.00      1.31x
+10000              20         0.06         0.05      1.30x
+100000             20         1.35         1.24      1.09x
+500000             20         7.21         7.87      0.92x
+
+====== Bench E: Gauss-Seidel Sweep ======
+n             nnz/row   Scalar(ms)     NEON(ms)    Speedup
+1000               20         0.01         0.00      1.55x
+10000              20         0.10         0.05      1.99x
+100000             20         1.43         1.24      1.15x
+500000             20         8.02         6.74      1.19x
+
+====== Bench D: Full Convergence (Jacobi, eps=1e-6) ======
+  MDP: Random n=50000, nnz/row=20, beta=0.99
+
+Operator                Wall(s)    Converged          Updates        UPS
+Scalar                    1.711          yes         65300000   3.82e+07
+NEON (via Runtime)        1.675          yes         65300000   3.90e+07
+
+Done.
