@@ -10,6 +10,9 @@
 
 using namespace helios;
 
+// Forward declaration - defined in test_operator_contract.cc
+int run_operator_contract_tests();
+
 // Forward declaration - defined in test_schedulers.cc
 int run_scheduler_tests();
 
@@ -325,6 +328,9 @@ int main() {
     if (!test_gauss_seidel_ring_convergence()) failures++;
     if (!test_async_ring_convergence()) failures++;
     if (!test_async_multithread_stress()) failures++;
+
+    // Run operator contract tests
+    failures += run_operator_contract_tests();
 
     // Run scheduler tests
     failures += run_scheduler_tests();
