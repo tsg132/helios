@@ -18,3 +18,7 @@ CMakeUserPresets.json
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated docs and plots
+docs/
+bench/results/plots/
