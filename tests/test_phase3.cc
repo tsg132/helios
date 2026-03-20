@@ -575,8 +575,11 @@ static bool test_plan_matches_scheduler() {
         if (diff > max_diff) max_diff = diff;
     }
 
-    if (max_diff > eps * 100) {
-        std::printf("FAIL: plan vs scheduler max_diff = %.9e\n", max_diff);
+    // Both code paths do identical sequential in-place sweeps (0..n-1) with
+    // alpha=1 and check residual after every sweep (monitor_interval_ms=0).
+    // They must stop after the same sweep K, so x_gs and x_plan are bit-identical.
+    if (max_diff > 1e-12) {
+        std::printf("FAIL: plan vs scheduler max_diff = %.9e (expected ~0)\n", max_diff);
         return false;
     }
 

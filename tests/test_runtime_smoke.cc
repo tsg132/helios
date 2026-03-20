@@ -320,6 +320,120 @@ bool test_async_multithread_stress() {
     return true;
 }
 
+// ─── Test: alpha < 1 under-relaxation ───────────────────────────────────────
+// Under-relaxation (0 < alpha < 1) must still converge to the correct V*.
+// It takes more sweeps, but the fixed point is unchanged.
+
+bool test_alpha_under_relaxation() {
+    constexpr index_t n = 16;
+    constexpr real_t beta = 0.9;
+    constexpr real_t eps = 1e-6;
+    const real_t expected = 1.0 / (1.0 - beta);
+
+    MDP mdp = build_ring_mdp(n, beta);
+    PolicyEvalOp op(&mdp);
+
+    auto run_check = [&](Mode mode, real_t alpha, const char* label) -> bool {
+        std::vector<real_t> x(n, 0.0);
+        RuntimeConfig cfg;
+        cfg.mode            = mode;
+        cfg.alpha           = alpha;
+        cfg.eps             = eps;
+        cfg.max_seconds     = 60.0;
+        cfg.max_updates     = 0;
+        cfg.monitor_interval_ms = 0;
+
+        Runtime rt;
+        StaticBlocksScheduler sched;
+        RunResult result = rt.run(op, sched, x.data(), cfg);
+
+        if (!result.converged) {
+            std::printf("FAIL: %s did not converge (residual=%.9e)\n",
+                        label, result.final_residual_inf);
+            return false;
+        }
+
+        real_t max_err = 0.0;
+        for (index_t i = 0; i < n; ++i)
+            max_err = std::max(max_err, std::abs(x[i] - expected));
+
+        if (max_err > eps * 10) {
+            std::printf("FAIL: %s solution too far from V* (max_err=%.9e)\n",
+                        label, max_err);
+            return false;
+        }
+
+        std::printf("PASS: %s (alpha=%.2f, %" PRIu64 " updates, max_err=%.2e)\n",
+                    label, alpha, result.total_updates, max_err);
+        return true;
+    };
+
+    bool ok = true;
+    ok &= run_check(Mode::Jacobi,      0.5, "Jacobi alpha=0.5");
+    ok &= run_check(Mode::GaussSeidel, 0.5, "GaussSeidel alpha=0.5");
+    return ok;
+}
+
+// ─── Test: max_updates stopping criterion ────────────────────────────────────
+// When max_updates is set, the loop must stop before exceeding the budget.
+// Each sweep increments by n; the cap is checked before each sweep, so
+// total_updates is always a multiple of n and at most max_updates.
+
+bool test_max_updates_stopping() {
+    constexpr index_t n = 16;
+    constexpr real_t beta = 0.9;
+
+    MDP mdp = build_ring_mdp(n, beta);
+    PolicyEvalOp op(&mdp);
+
+    // eps_tight: so tight we never accidentally converge in a few sweeps.
+    constexpr real_t eps_tight = 1e-15;
+
+    auto run_capped = [&](Mode mode, uint64_t cap, const char* label) -> bool {
+        std::vector<real_t> x(n, 0.0);
+        RuntimeConfig cfg;
+        cfg.mode            = mode;
+        cfg.alpha           = 1.0;
+        cfg.eps             = eps_tight;
+        cfg.max_seconds     = 60.0;
+        cfg.max_updates     = cap;
+        cfg.monitor_interval_ms = 0;
+
+        Runtime rt;
+        StaticBlocksScheduler sched;
+        RunResult result = rt.run(op, sched, x.data(), cfg);
+
+        if (result.total_updates > cap) {
+            std::printf("FAIL: %s exceeded cap: %" PRIu64 " > %" PRIu64 "\n",
+                        label, result.total_updates, cap);
+            return false;
+        }
+
+        // Sanity: x must be non-zero after at least one sweep.
+        if (cap >= static_cast<uint64_t>(n)) {
+            real_t sum = 0.0;
+            for (index_t i = 0; i < n; ++i) sum += x[i];
+            if (sum == 0.0) {
+                std::printf("FAIL: %s x is all-zero after %" PRIu64 " updates\n",
+                            label, result.total_updates);
+                return false;
+            }
+        }
+
+        std::printf("PASS: %s (cap=%" PRIu64 " got=%" PRIu64 " converged=%s)\n",
+                    label, cap, result.total_updates,
+                    result.converged ? "yes" : "no");
+        return true;
+    };
+
+    bool ok = true;
+    ok &= run_capped(Mode::Jacobi,      n,     "Jacobi max_updates=1*n");
+    ok &= run_capped(Mode::Jacobi,      3 * n, "Jacobi max_updates=3*n");
+    ok &= run_capped(Mode::GaussSeidel, n,     "GaussSeidel max_updates=1*n");
+    ok &= run_capped(Mode::GaussSeidel, 3 * n, "GaussSeidel max_updates=3*n");
+    return ok;
+}
+
 int main() {
     int failures = 0;
 
@@ -328,6 +442,8 @@ int main() {
     if (!test_gauss_seidel_ring_convergence()) failures++;
     if (!test_async_ring_convergence()) failures++;
     if (!test_async_multithread_stress()) failures++;
+    if (!test_alpha_under_relaxation()) failures++;
+    if (!test_max_updates_stopping()) failures++;
 
     // Run operator contract tests
     failures += run_operator_contract_tests();
