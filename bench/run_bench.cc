@@ -55,6 +55,8 @@ struct BenchEntry {
     bool converged;
     size_t threads;
     std::vector<ResidualSample> trace;
+    ProfilingResult profiling;    // per-thread timing breakdown
+    double bandwidth_GBps = 0.0; // effective memory bandwidth (analytical estimate)
 };
 
 static FILE* open_csv(const char* fname, const char* hdr) {
@@ -77,8 +79,10 @@ static BenchEntry run_sched(const MDP& mdp, const char* mn, Scheduler& sc, const
     cfg.record_trace = g_record_trace;
     Runtime rt;
     RunResult rr = rt.run(op, sc, x.data(), cfg);
+    double bw = mdp.avg_bytes_per_update() * rr.updates_per_sec / 1e9;
     return {mn, sn, mdp.n, mdp.beta, rr.wall_time_sec, rr.total_updates,
-            rr.updates_per_sec, rr.final_residual_inf, rr.converged, T, std::move(rr.trace)};
+            rr.updates_per_sec, rr.final_residual_inf, rr.converged, T,
+            std::move(rr.trace), std::move(rr.profiling), bw};
 }
 
 static BenchEntry run_plan(const MDP& mdp, const char* mn, Planner& pl, const PlannerConfig& pc,
@@ -93,8 +97,10 @@ static BenchEntry run_plan(const MDP& mdp, const char* mn, Planner& pl, const Pl
     cfg.record_trace = g_record_trace;
     Runtime rt;
     RunResult rr = rt.run_plan(op, plan, x.data(), cfg);
+    double bw = mdp.avg_bytes_per_update() * rr.updates_per_sec / 1e9;
     return {mn, pn, mdp.n, mdp.beta, rr.wall_time_sec, rr.total_updates,
-            rr.updates_per_sec, rr.final_residual_inf, rr.converged, T, std::move(rr.trace)};
+            rr.updates_per_sec, rr.final_residual_inf, rr.converged, T,
+            std::move(rr.trace), std::move(rr.profiling), bw};
 }
 
 static void write_trace(FILE* f, const BenchEntry& e) {
@@ -103,17 +109,34 @@ static void write_trace(FILE* f, const BenchEntry& e) {
                      e.mdp_name.c_str(), e.solver_name.c_str(), e.n, e.beta, e.threads, s.time_sec, s.residual);
 }
 static void write_summary(FILE* f, const BenchEntry& e) {
-    std::fprintf(f, "%s,%s,%u,%.4f,%zu,%s,%.6f,%" PRIu64 ",%.6e,%.6e\n",
+    std::fprintf(f, "%s,%s,%u,%.4f,%zu,%s,%.6f,%" PRIu64 ",%.6e,%.6e,%.4f\n",
                  e.mdp_name.c_str(), e.solver_name.c_str(), e.n, e.beta, e.threads,
-                 e.converged ? "true" : "false", e.wall_sec, e.total_updates, e.updates_per_sec, e.final_residual);
-}
-static void pr(const BenchEntry& e) {
-    std::printf("    %-25s %s  %.3fs  %.2e ups  res=%.2e  updates=%" PRIu64 "\n",
-                e.solver_name.c_str(), e.converged?"CONV":"FAIL", e.wall_sec, e.updates_per_sec,
-                e.final_residual, e.total_updates);
+                 e.converged ? "true" : "false", e.wall_sec, e.total_updates,
+                 e.updates_per_sec, e.final_residual, e.bandwidth_GBps);
 }
 
-#define EMIT(e) do { pr(e); write_trace(tf,e); write_summary(sf,e); } while(0)
+// Profiling breakdown CSV row: op_compute %, residual %, overhead %, avg times.
+static void write_breakdown(FILE* f, const BenchEntry& e) {
+    auto bd = e.profiling.breakdown(e.wall_sec);
+    std::fprintf(f, "%s,%s,%zu,%.6f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                 e.mdp_name.c_str(), e.solver_name.c_str(), e.threads, e.wall_sec,
+                 bd.op_compute_pct(), bd.residual_pct(), bd.overhead_pct(),
+                 e.profiling.avg_update_cost_ns(), e.profiling.avg_residual_scan_ns());
+}
+
+static void pr(const BenchEntry& e) {
+    std::printf("    %-25s %s  %.3fs  %.2e ups  %.2f GB/s  res=%.2e\n",
+                e.solver_name.c_str(), e.converged?"CONV":"FAIL", e.wall_sec,
+                e.updates_per_sec, e.bandwidth_GBps, e.final_residual);
+}
+
+// g_bf: optional profiling breakdown file (non-null only during bench_convergence)
+static FILE* g_bf = nullptr;
+
+#define EMIT(e) do { \
+    pr(e); write_trace(tf,e); write_summary(sf,e); \
+    if (g_bf) write_breakdown(g_bf, e); \
+} while(0)
 
 // ─── Bench 1: Convergence comparison ────────────────────────────────────────
 // Uses large problems with high beta to produce rich convergence traces.
@@ -125,6 +148,11 @@ static void bench_convergence(FILE* tf, FILE* sf) {
     const real_t eps = g_quick ? 1e-6 : 1e-8;
     const double ms = g_quick ? 30.0 : 120.0;
     const size_t T = 4;
+
+    // Open profiling breakdown CSV (closed at the end of this function)
+    g_bf = open_csv("profiling_breakdown.csv",
+        "mdp,solver,threads,wall_sec,op_compute_pct,residual_pct,overhead_pct,"
+        "avg_update_ns,avg_scan_ns");
 
     struct MC { const char* n; MDP m; };
     std::vector<MC> mdps;
@@ -164,6 +192,8 @@ static void bench_convergence(FILE* tf, FILE* sf) {
           pc.K=std::max(index_t(16),mc.m.n/5); pc.hot_phase_enabled=true;
           auto e=run_plan(mc.m,mc.n,pl,pc,"Plan_Priority",T,eps,ms); EMIT(e); }
     }
+
+    if (g_bf) { std::fclose(g_bf); g_bf = nullptr; }
 }
 
 // ─── Bench 2: Beta sensitivity ──────────────────────────────────────────────
@@ -229,7 +259,7 @@ static void bench_threads(FILE* sf) {
     }
 
     FILE* scf = open_csv("thread_scaling.csv",
-        "mdp,solver,n,beta,threads,converged,wall_sec,total_updates,updates_per_sec,final_residual");
+        "mdp,solver,n,beta,threads,converged,wall_sec,total_updates,updates_per_sec,final_residual,bandwidth_GBps");
     if (!scf) return;
 
     std::vector<size_t> thread_counts = {1, 2, 4, 8};
@@ -269,18 +299,38 @@ static void bench_difficulty(FILE* tf, FILE* sf) {
     const double ms = g_quick ? 30.0 : 120.0;
     const index_t meta_n = g_quick ? 2000 : 4000;
 
+    // Separate CSV with spectral-gap annotation.
+    // Spectral gap approximation for a symmetric two-cluster chain:
+    //   P_lump = [[1-p_b, p_b], [p_b, 1-p_b]]  →  lambda_2 = 1 - 2*p_bridge
+    //   gap = 2 * p_bridge  (bottleneck = inter-cluster flow)
+    FILE* dsf = open_csv("difficulty_spectrum.csv",
+        "mdp,p_bridge,spectral_gap_approx,n,beta,solver,converged,wall_sec,updates_per_sec");
+    if (!dsf) dsf = nullptr;  // non-fatal: still write to sf/tf
+
     for (double pb : {0.20, 0.10, 0.05, 0.02, 0.01}) {
+        const double gap = 2.0 * pb;  // two-state bottleneck approximation
         MDP mdp = build_metastable_mdp(meta_n, 0.999, 1.0-pb, pb, 1.0, 3.0, 42);
         char nm[64]; std::snprintf(nm, sizeof(nm), "Meta_pb%.3f", pb);
-        std::printf("\n  p_bridge=%.3f (n=%u)\n", pb, mdp.n);
-        { StaticBlocksScheduler s; auto e=run_sched(mdp,nm,s,"Jacobi",Mode::Jacobi,1,eps,ms); EMIT(e); }
-        { StaticBlocksScheduler s; auto e=run_sched(mdp,nm,s,"GaussSeidel",Mode::GaussSeidel,1,eps,ms); EMIT(e); }
+        std::printf("\n  p_bridge=%.3f  gap≈%.4f  (n=%u)\n", pb, gap, mdp.n);
+
+        auto emit_ds = [&](const BenchEntry& e) {
+            EMIT(e);
+            if (dsf)
+                std::fprintf(dsf, "%s,%.3f,%.4f,%u,%.4f,%s,%s,%.6f,%.6e\n",
+                             nm, pb, gap, mdp.n, mdp.beta, e.solver_name.c_str(),
+                             e.converged?"true":"false", e.wall_sec, e.updates_per_sec);
+        };
+
+        { StaticBlocksScheduler s; auto e=run_sched(mdp,nm,s,"Jacobi",Mode::Jacobi,1,eps,ms); emit_ds(e); }
+        { StaticBlocksScheduler s; auto e=run_sched(mdp,nm,s,"GaussSeidel",Mode::GaussSeidel,1,eps,ms); emit_ds(e); }
         { TopKGSScheduler::Params p; p.K=std::max(index_t(16),mdp.n/10); TopKGSScheduler s(p);
-          auto e=run_sched(mdp,nm,s,"Async_TopKGS",Mode::Async,4,eps,ms); EMIT(e); }
+          auto e=run_sched(mdp,nm,s,"Async_TopKGS",Mode::Async,4,eps,ms); emit_ds(e); }
         { PriorityPlanner pl; PlannerConfig pc; pc.threads=4; pc.blk=32; pc.colors=4;
           pc.K=std::max(index_t(16),mdp.n/5); pc.hot_phase_enabled=true;
-          auto e=run_plan(mdp,nm,pl,pc,"Plan_Priority",4,eps,ms); EMIT(e); }
+          auto e=run_plan(mdp,nm,pl,pc,"Plan_Priority",4,eps,ms); emit_ds(e); }
     }
+
+    if (dsf) std::fclose(dsf);
 }
 
 // ─── Bench 5: Problem size scaling ──────────────────────────────────────────
@@ -299,7 +349,7 @@ static void bench_size(FILE* sf) {
         : std::vector<index_t>{1000, 5000, 20000, 100000, 500000};
 
     FILE* szf = open_csv("size_scaling.csv",
-        "mdp,solver,n,beta,threads,converged,wall_sec,total_updates,updates_per_sec,final_residual");
+        "mdp,solver,n,beta,threads,converged,wall_sec,total_updates,updates_per_sec,final_residual,bandwidth_GBps");
     if (!szf) return;
 
     for (index_t n : sizes) {
@@ -374,9 +424,11 @@ static void bench_autotune(FILE* sf) {
                      at.best.pilot_residual_drop, at.autotune_time_sec,
                      rr.converged?"true":"false", rr.wall_time_sec, rr.updates_per_sec);
 
+        double bw = ac.m.avg_bytes_per_update() * rr.updates_per_sec / 1e9;
         BenchEntry e{ac.n, "AT_"+at.best.planner_name, ac.m.n, ac.m.beta,
                      rr.wall_time_sec, rr.total_updates, rr.updates_per_sec,
-                     rr.final_residual_inf, rr.converged, 4, {}};
+                     rr.final_residual_inf, rr.converged, 4,
+                     {}, std::move(rr.profiling), bw};
         write_summary(sf, e);
     }
     std::fclose(af);
@@ -402,7 +454,7 @@ int main(int argc, char** argv) {
 
     FILE* tf = open_csv("convergence_traces.csv", "mdp,solver,n,beta,threads,time_sec,residual");
     FILE* sf = open_csv("summary.csv",
-        "mdp,solver,n,beta,threads,converged,wall_sec,total_updates,updates_per_sec,final_residual");
+        "mdp,solver,n,beta,threads,converged,wall_sec,total_updates,updates_per_sec,final_residual,bandwidth_GBps");
     if (!tf || !sf) return 1;
 
     const bool all = only_bench.empty();

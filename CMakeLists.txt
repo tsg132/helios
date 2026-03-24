@@ -9,12 +9,14 @@ project(helios
 )
 
 # ---------- Options ----------
-option(HELIOS_BUILD_TESTS "Build tests" ON)
-option(HELIOS_BUILD_BENCH  "Build benchmarks" ON)
-option(HELIOS_ENABLE_LTO   "Enable link-time optimization" ON)
-option(HELIOS_ENABLE_ASAN  "Enable AddressSanitizer (Debug only recommended)" OFF)
-option(HELIOS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (Debug only recommended)" OFF)
-option(HELIOS_WERROR       "Treat warnings as errors" ON)
+option(HELIOS_BUILD_TESTS   "Build tests" ON)
+option(HELIOS_BUILD_BENCH   "Build benchmarks" ON)
+option(HELIOS_ENABLE_LTO    "Enable link-time optimization" ON)
+option(HELIOS_ENABLE_ASAN   "Enable AddressSanitizer (Debug only recommended)" OFF)
+option(HELIOS_ENABLE_UBSAN  "Enable UndefinedBehaviorSanitizer (Debug only recommended)" OFF)
+option(HELIOS_WERROR        "Treat warnings as errors" ON)
+option(HELIOS_WITH_OPENMP   "Build OpenMP baseline (requires libomp on macOS)" ON)
+option(HELIOS_WITH_EIGEN    "Build Eigen baseline (requires Eigen3)" ON)
 
 # ---------- Global settings ----------
 set(CMAKE_CXX_STANDARD 20)
@@ -72,6 +74,54 @@ helios_enable_lto(helios ${HELIOS_ENABLE_LTO})
 find_package(Threads REQUIRED)
 target_link_libraries(helios PUBLIC Threads::Threads)
 
+# ---------- Optional: OpenMP (for baselines) ----------
+if(HELIOS_WITH_OPENMP)
+  if(APPLE)
+    # Apple Clang ships without OpenMP; find libomp from Homebrew.
+    execute_process(
+      COMMAND brew --prefix libomp
+      OUTPUT_VARIABLE HOMEBREW_LIBOMP
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(HOMEBREW_LIBOMP)
+      set(OpenMP_C_FLAGS   "-Xpreprocessor -fopenmp")
+      set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
+      set(OpenMP_C_LIB_NAMES   "omp")
+      set(OpenMP_CXX_LIB_NAMES "omp")
+      set(OpenMP_omp_LIBRARY "${HOMEBREW_LIBOMP}/lib/libomp.dylib")
+      include_directories("${HOMEBREW_LIBOMP}/include")
+    endif()
+  endif()
+  find_package(OpenMP)
+  if(NOT OpenMP_CXX_FOUND)
+    message(WARNING "OpenMP not found — helios_baselines will skip OpenMP_Jacobi")
+    set(HELIOS_WITH_OPENMP OFF)
+  endif()
+endif()
+
+# ---------- Optional: Eigen3 (for baselines) ----------
+if(HELIOS_WITH_EIGEN)
+  # On macOS with Homebrew, prepend the Eigen prefix so CMake finds the config.
+  if(APPLE)
+    execute_process(
+      COMMAND brew --prefix eigen
+      OUTPUT_VARIABLE HOMEBREW_EIGEN_PREFIX
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(HOMEBREW_EIGEN_PREFIX)
+      list(APPEND CMAKE_PREFIX_PATH "${HOMEBREW_EIGEN_PREFIX}")
+    endif()
+  endif()
+  find_package(Eigen3 CONFIG QUIET)
+  if(NOT Eigen3_FOUND)
+    find_package(Eigen3 MODULE QUIET)
+  endif()
+  if(NOT Eigen3_FOUND)
+    message(WARNING "Eigen3 not found — helios_baselines will skip Eigen_Jacobi")
+    set(HELIOS_WITH_EIGEN OFF)
+  endif()
+endif()
+
 # ---------- Bench executable ----------
 if(HELIOS_BUILD_BENCH)
   add_executable(helios_bench
@@ -91,6 +141,24 @@ if(HELIOS_BUILD_BENCH)
   target_link_libraries(helios_bench_simd PRIVATE helios)
   helios_enable_sanitizers(helios_bench_simd ${HELIOS_ENABLE_ASAN} ${HELIOS_ENABLE_UBSAN})
   helios_enable_lto(helios_bench_simd ${HELIOS_ENABLE_LTO})
+
+  # ── Baseline comparison executable ──────────────────────────────────────────
+  add_executable(helios_baselines bench/baselines.cc)
+  target_link_libraries(helios_baselines PRIVATE helios)
+  helios_enable_sanitizers(helios_baselines ${HELIOS_ENABLE_ASAN} ${HELIOS_ENABLE_UBSAN})
+  helios_enable_lto(helios_baselines ${HELIOS_ENABLE_LTO})
+
+  if(HELIOS_WITH_OPENMP AND OpenMP_CXX_FOUND)
+    target_link_libraries(helios_baselines PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(helios_baselines PRIVATE HELIOS_HAS_OPENMP=1)
+    message(STATUS "helios_baselines: OpenMP enabled")
+  endif()
+
+  if(HELIOS_WITH_EIGEN AND Eigen3_FOUND)
+    target_link_libraries(helios_baselines PRIVATE Eigen3::Eigen)
+    target_compile_definitions(helios_baselines PRIVATE HELIOS_HAS_EIGEN=1)
+    message(STATUS "helios_baselines: Eigen3 enabled")
+  endif()
 endif()
 
 # ---------- Tests ----------

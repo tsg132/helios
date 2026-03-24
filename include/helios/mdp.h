@@ -53,6 +53,20 @@ struct MDP {
 
     index_t nns() const noexcept { return static_cast<index_t>(probs.size()); }
 
+    // Average bytes accessed per coordinate update.
+    // F_i(x) = r[i] + beta * sum_j P_ij * x[j]
+    //
+    // Per update for state i (nnz_i transitions):
+    //   Read:  row_ptr[i:i+2] (8B) + col_idx (nnz_i*4B) + probs (nnz_i*8B)
+    //          + x[j] for each j (nnz_i*8B) + r[i] (8B)
+    //   Write: x[i] (8B)
+    //   Total: 16 + nnz_i * 20 bytes
+    double avg_bytes_per_update() const noexcept {
+        if (n == 0) return 0.0;
+        const double nnz_avg = static_cast<double>(nns()) / static_cast<double>(n);
+        return 16.0 + nnz_avg * 20.0;
+    }
+
     void validate(bool strict_row_stochastic = true, real_t tol = 1e-9) const {
 
         if (n == 0) throw runtime_error("MDP has zero states");

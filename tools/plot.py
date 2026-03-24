@@ -93,59 +93,79 @@ _OI = {
 }
 
 SOLVER_COLORS = {
-    "Jacobi":         _OI["blue"],
-    "GaussSeidel":    _OI["vermillion"],
-    "Async_Static":   _OI["green"],
-    "Async_Shuffled": _OI["orange"],
-    "Async_TopKGS":   _OI["pink"],
-    "Async_CATopKGS": _OI["black"],
-    "Async_ResBuck":  _OI["sky_blue"],
-    "Plan_Static":    _OI["orange"],
-    "Plan_Colored":   _OI["sky_blue"],
-    "Plan_Priority":  _OI["pink"],
-    "AT_Static":      _OI["orange"],
+    "Jacobi":               _OI["blue"],
+    "GaussSeidel":          _OI["vermillion"],
+    "Async_Static":         _OI["green"],
+    "Async_Shuffled":       _OI["orange"],
+    "Async_TopKGS":         _OI["pink"],
+    "Async_CATopKGS":       _OI["black"],
+    "Async_ResBuck":        _OI["sky_blue"],
+    "Plan_Static":          _OI["orange"],
+    "Plan_Colored":         _OI["sky_blue"],
+    "Plan_Priority":        _OI["pink"],
+    "AT_Static":            _OI["orange"],
+    # ── External baselines ──
+    "Naive_Jacobi":         "#aaaaaa",
+    "RawParallel_Jacobi":   "#777777",
+    "OpenMP_Jacobi":        _OI["orange"],
+    "Eigen_Jacobi":         _OI["sky_blue"],
 }
 
 SOLVER_MARKERS = {
-    "Jacobi":         "o",
-    "GaussSeidel":    "s",
-    "Async_Static":   "^",
-    "Async_Shuffled": "D",
-    "Async_TopKGS":   "v",
-    "Async_CATopKGS": "P",
-    "Async_ResBuck":  "h",
-    "Plan_Static":    "D",
-    "Plan_Colored":   "p",
-    "Plan_Priority":  "*",
-    "AT_Static":      "X",
+    "Jacobi":               "o",
+    "GaussSeidel":          "s",
+    "Async_Static":         "^",
+    "Async_Shuffled":       "D",
+    "Async_TopKGS":         "v",
+    "Async_CATopKGS":       "P",
+    "Async_ResBuck":        "h",
+    "Plan_Static":          "D",
+    "Plan_Colored":         "p",
+    "Plan_Priority":        "*",
+    "AT_Static":            "X",
+    # ── External baselines ──
+    "Naive_Jacobi":         "o",
+    "RawParallel_Jacobi":   "^",
+    "OpenMP_Jacobi":        "s",
+    "Eigen_Jacobi":         "D",
 }
 
 SOLVER_HATCHES = {
-    "Jacobi":         "",
-    "GaussSeidel":    "///",
-    "Async_Static":   "...",
-    "Async_Shuffled": "xxx",
-    "Async_TopKGS":   "+++",
-    "Async_CATopKGS": "OOO",
-    "Async_ResBuck":  "---",
-    "Plan_Static":    "\\\\\\",
-    "Plan_Colored":   "|||",
-    "Plan_Priority":  "**",
-    "AT_Static":      "\\\\\\",
+    "Jacobi":               "",
+    "GaussSeidel":          "///",
+    "Async_Static":         "...",
+    "Async_Shuffled":       "xxx",
+    "Async_TopKGS":         "+++",
+    "Async_CATopKGS":       "OOO",
+    "Async_ResBuck":        "---",
+    "Plan_Static":          "\\\\\\",
+    "Plan_Colored":         "|||",
+    "Plan_Priority":        "**",
+    "AT_Static":            "\\\\\\",
+    # ── External baselines ──
+    "Naive_Jacobi":         "",
+    "RawParallel_Jacobi":   "...",
+    "OpenMP_Jacobi":        "///",
+    "Eigen_Jacobi":         "xxx",
 }
 
 SOLVER_LABELS = {
-    "Jacobi":         "Jacobi",
-    "GaussSeidel":    "Gauss-Seidel",
-    "Async_Static":   "Async (Static)",
-    "Async_Shuffled": "Async (Shuffled)",
-    "Async_TopKGS":   r"Async (TopK-GS)",
-    "Async_CATopKGS": "Async (CA-TopK)",
-    "Async_ResBuck":  "Async (ResBucket)",
-    "Plan_Static":    "Plan (Static)",
-    "Plan_Colored":   "Plan (Colored)",
-    "Plan_Priority":  "Plan (Priority)",
-    "AT_Static":      "AutoTune (Static)",
+    "Jacobi":               "Jacobi",
+    "GaussSeidel":          "Gauss-Seidel",
+    "Async_Static":         "Async (Static)",
+    "Async_Shuffled":       "Async (Shuffled)",
+    "Async_TopKGS":         r"Async (TopK-GS)",
+    "Async_CATopKGS":       "Async (CA-TopK)",
+    "Async_ResBuck":        "Async (ResBucket)",
+    "Plan_Static":          "Plan (Static)",
+    "Plan_Colored":         "Plan (Colored)",
+    "Plan_Priority":        "Plan (Priority)",
+    "AT_Static":            "AutoTune (Static)",
+    # ── External baselines ──
+    "Naive_Jacobi":         "Naive Jacobi (1T)",
+    "RawParallel_Jacobi":   "Raw Parallel Jacobi",
+    "OpenMP_Jacobi":        "OpenMP Jacobi",
+    "Eigen_Jacobi":         "Eigen SpMV Jacobi",
 }
 
 SOLVER_ORDER = [
@@ -577,6 +597,15 @@ def plot_difficulty(traces, summary, outdir):
     ax1.yaxis.grid(True, which="major", alpha=0.3, linewidth=0.5, color="#999999")
     ax1.legend(loc="upper left", fontsize=7, framealpha=0.9)
 
+    # Add secondary x-axis showing spectral gap = 2 * p_bridge
+    ax1_top = ax1.twiny()
+    ax1_top.set_xlim(ax1.get_xlim())  # same range, same direction (inverted)
+    pb_ticks = [0.20, 0.10, 0.05, 0.02, 0.01]
+    gap_ticks = [2 * pb for pb in pb_ticks]
+    ax1_top.set_xticks(pb_ticks)
+    ax1_top.set_xticklabels([f"{g:.2f}" for g in gap_ticks], fontsize=7)
+    ax1_top.set_xlabel(r"Spectral gap $\approx 2p_\mathrm{bridge}$", fontsize=7)
+
     meta_traces = traces[traces["mdp"].str.startswith("Meta_pb")]
     if not meta_traces.empty:
         hardest = sorted(meta_traces["mdp"].unique())[-1]
@@ -902,6 +931,220 @@ def plot_solver_family_comparison(summary, outdir):
     print("  => family_comparison saved")
 
 
+# ─── Plot 12: Baseline Comparison ─────────────────────────────────────────────
+# Compares external baselines (Naive, OpenMP, Eigen) against Helios solvers
+# on random sparse MDPs at n = {100K, 500K, 1M}.
+# Reads: baselines.csv (external impls) + size_scaling.csv (Helios impls)
+
+def plot_baseline_comparison(datadir, outdir):
+    bl_path = os.path.join(datadir, "baselines.csv")
+    sz_path = os.path.join(datadir, "size_scaling.csv")
+    if not os.path.exists(bl_path):
+        print("  [skip] baselines.csv not found")
+        return
+
+    bl = pd.read_csv(bl_path)
+    if bl.empty:
+        print("  [skip] baselines.csv is empty")
+        return
+
+    # Helios comparison solvers from size_scaling.csv
+    helios = pd.DataFrame()
+    if os.path.exists(sz_path):
+        helios = pd.read_csv(sz_path)
+
+    # Normalise mdp name: "Rand_n100000" → n=100000
+    bl["n"] = bl["n"].astype(int)
+    if not helios.empty:
+        helios["n"] = helios["n"].astype(int)
+        helios = helios[is_converged(helios)]
+
+    sizes = sorted(bl["n"].unique())
+    if not sizes:
+        return
+
+    # ── Figure 1: Wall time bar chart ────────────────────────────────────────
+    # Implementations shown per problem size
+    bl_impls = list(bl["impl"].unique())
+    helios_solvers = ["Jacobi", "GaussSeidel", "Plan_Static_4T", "Async_Static_4T"]
+    all_impls = bl_impls + [s for s in helios_solvers
+                             if not helios.empty and s in helios["solver"].values]
+
+    n_sizes = len(sizes)
+    n_impls = len(all_impls)
+    if n_impls == 0:
+        return
+
+    fig, axes = plt.subplots(1, n_sizes,
+                             figsize=(max(5.0, n_sizes * 2.8), 3.2),
+                             sharey=False)
+    if n_sizes == 1:
+        axes = [axes]
+
+    for ax_idx, n in enumerate(sizes):
+        ax = axes[ax_idx]
+        _apply_spine_style(ax)
+
+        # Collect wall times for this n
+        impl_names = []
+        wall_times = []
+        colors = []
+        hatches_list = []
+        converged_flags = []
+
+        for impl in all_impls:
+            if impl in bl_impls:
+                row = bl[(bl["impl"] == impl) & (bl["n"] == n)]
+                if row.empty:
+                    continue
+                row = row.iloc[0]
+                impl_names.append(impl)
+                wall_times.append(row["wall_sec"])
+                colors.append(clr(impl))
+                hatches_list.append(hatch(impl))
+                converged_flags.append(str(row["converged"]).lower() == "true")
+            else:
+                if helios.empty:
+                    continue
+                row = helios[(helios["solver"] == impl) & (helios["n"] == n)]
+                if row.empty:
+                    continue
+                row = row.iloc[0]
+                impl_names.append(impl)
+                wall_times.append(row["wall_sec"])
+                colors.append(clr(impl))
+                hatches_list.append(hatch(impl))
+                converged_flags.append(True)
+
+        if not impl_names:
+            continue
+
+        x = np.arange(len(impl_names))
+        bars = ax.bar(x, wall_times, width=0.7,
+                      color=colors, edgecolor="white", linewidth=0.6, alpha=0.85)
+        for bar, h in zip(bars, hatches_list):
+            bar.set_hatch(h)
+
+        # Mark unconverged bars with a crosshatch overlay
+        for bar, conv in zip(bars, converged_flags):
+            if not conv:
+                bar.set_alpha(0.45)
+                bar.set_linestyle("--")
+
+        ax.set_xticks(x)
+        short_labels = [lbl(impl).replace(" Jacobi", "\nJacobi")
+                                  .replace(" SpMV", "\nSpMV")
+                                  .replace(" (", "\n(") for impl in impl_names]
+        ax.set_xticklabels(short_labels, fontsize=7, rotation=30, ha="right")
+        ax.set_title(f"n = {fmt_n(n)}", fontsize=9, fontweight="bold")
+        ax.set_ylabel("Wall time (s)" if ax_idx == 0 else "", fontsize=8)
+        ax.yaxis.grid(True, which="major", alpha=0.3, linewidth=0.5, color="#999999")
+
+        # Compute and annotate speedup vs Naive_Jacobi
+        naive_rows = [i for i, impl in enumerate(impl_names) if impl == "Naive_Jacobi"]
+        if naive_rows:
+            naive_t = wall_times[naive_rows[0]]
+            for i, (t, conv) in enumerate(zip(wall_times, converged_flags)):
+                if conv and naive_t > 0 and i != naive_rows[0]:
+                    speedup = naive_t / t
+                    ax.annotate(f"{speedup:.1f}×",
+                                xy=(i, t), xytext=(0, 3),
+                                textcoords="offset points",
+                                ha="center", fontsize=6.5, color="#333333")
+
+    fig.suptitle("Helios vs. baseline solvers (random sparse MDP, nnz/row=20, β=0.99)",
+                 fontsize=9, fontweight="bold", y=1.01)
+    fig.tight_layout()
+    _save(fig, outdir, "baseline_comparison")
+
+    # ── Figure 2: Throughput comparison (updates/sec) ───────────────────────
+    fig2, ax2 = plt.subplots(figsize=(max(5.0, n_sizes * 1.5), 3.0))
+    _apply_spine_style(ax2)
+
+    bar_w = 0.8 / n_sizes
+    x2 = np.arange(len(all_impls))
+
+    for sz_idx, n in enumerate(sizes):
+        ups_vals = []
+        for impl in all_impls:
+            if impl in bl_impls:
+                row = bl[(bl["impl"] == impl) & (bl["n"] == n)]
+                ups_vals.append(row["updates_per_sec"].iloc[0] if not row.empty else 0.0)
+            else:
+                if helios.empty:
+                    ups_vals.append(0.0)
+                    continue
+                row = helios[(helios["solver"] == impl) & (helios["n"] == n)]
+                ups_vals.append(row["updates_per_sec"].iloc[0] if not row.empty else 0.0)
+
+        offset = (sz_idx - (n_sizes - 1) / 2) * bar_w
+        ax2.bar(x2 + offset, ups_vals, width=bar_w * 0.9,
+                label=f"n={fmt_n(n)}", alpha=0.85, edgecolor="white", linewidth=0.5)
+
+    ax2.set_xticks(x2)
+    ax2.set_xticklabels([lbl(s) for s in all_impls],
+                         fontsize=7, rotation=25, ha="right")
+    ax2.set_ylabel("Updates / second", fontsize=8)
+    ax2.set_title("Throughput comparison (random sparse MDP)", fontsize=9, fontweight="bold")
+    ax2.yaxis.grid(True, which="major", alpha=0.3, linewidth=0.5, color="#999999")
+    ax2.legend(fontsize=8, framealpha=0.9)
+    fig2.tight_layout()
+    _save(fig2, outdir, "baseline_throughput")
+
+    print("  => baseline_comparison, baseline_throughput saved")
+
+
+# ─── Plot 13: Profiling Breakdown ─────────────────────────────────────────────
+# Shows fraction of wall time spent in operator compute vs. residual scan
+# vs. scheduler overhead, for each solver on each MDP.
+
+def plot_profiling_breakdown(datadir, outdir):
+    bd_path = os.path.join(datadir, "profiling_breakdown.csv")
+    if not os.path.exists(bd_path):
+        print("  [skip] profiling_breakdown.csv not found")
+        return
+
+    bd = pd.read_csv(bd_path)
+    if bd.empty:
+        return
+
+    # Average across MDPs for each solver
+    agg = bd.groupby("solver")[["op_compute_pct", "residual_pct", "overhead_pct"]].mean()
+    agg = agg.reindex([s for s in SOLVER_ORDER if s in agg.index])
+    if agg.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(max(5.0, len(agg) * 0.7), 3.0))
+    _apply_spine_style(ax)
+
+    x = np.arange(len(agg))
+    bar_w = 0.65
+    bottom = np.zeros(len(agg))
+
+    categories = [
+        ("op_compute_pct",  _OI["blue"],      "Operator compute"),
+        ("residual_pct",    _OI["vermillion"], "Residual scan"),
+        ("overhead_pct",    "#aaaaaa",         "Scheduler + sync overhead"),
+    ]
+    for col, color, label_str in categories:
+        vals = agg[col].values
+        ax.bar(x, vals, width=bar_w, bottom=bottom, color=color,
+               edgecolor="white", linewidth=0.5, alpha=0.85, label=label_str)
+        bottom += vals
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([lbl(s) for s in agg.index], fontsize=7, rotation=25, ha="right")
+    ax.set_ylabel("% of wall time", fontsize=8)
+    ax.set_ylim(0, 105)
+    ax.set_title("Runtime breakdown (averaged across MDPs)", fontsize=9, fontweight="bold")
+    ax.yaxis.grid(True, which="major", alpha=0.3, linewidth=0.5, color="#999999")
+    ax.legend(fontsize=8, framealpha=0.9, loc="upper right")
+
+    fig.tight_layout()
+    _save(fig, outdir, "profiling_breakdown")
+    print("  => profiling_breakdown saved")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -958,6 +1201,8 @@ def main():
     plot_autotune(datadir, datadir)
     plot_simd(datadir, datadir)
     plot_solver_family_comparison(summary, datadir)
+    plot_baseline_comparison(datadir, datadir)
+    plot_profiling_breakdown(datadir, datadir)
 
     print(f"\nAll plots saved to {plots_dir}/")
     print("Each figure saved as both .png (300 DPI) and .pdf (vector).")
